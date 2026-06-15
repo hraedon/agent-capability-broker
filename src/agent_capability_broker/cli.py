@@ -13,7 +13,8 @@ import json
 import sys
 from pathlib import Path
 
-from .model import KNOWN_HARNESSES, ManifestError, Status, Verdict, parse_manifest
+from . import provenance
+from .model import KNOWN_HARNESSES, Action, ManifestError, Status, Verdict, parse_manifest
 from .providers import PROVIDERS, adapters
 
 
@@ -74,6 +75,64 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if any(v.status in bad for v in verdicts) else 0
 
 
+def _plan_all(manifest_path: Path) -> list[Action]:
+    """Collect reconcile actions across every capability x listed harness."""
+    caps = parse_manifest(manifest_path)
+    harness_adapters = adapters()
+    plan: list[Action] = []
+    for cap in caps:
+        provider = PROVIDERS.get(cap.provider)
+        if provider is None:
+            continue
+        for harness in sorted(cap.harnesses):
+            adapter = harness_adapters.get(harness)
+            if adapter is None or not adapter.available():
+                continue
+            plan.extend(provider.plan_reconcile(cap, harness, adapter))
+    return plan
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    try:
+        plan = _plan_all(Path(args.manifest))
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if not plan:
+        print("nothing to reconcile — all capabilities present and working")
+        return 0
+
+    harness_adapters = adapters()
+    auto = [a for a in plan if a.kind != "manual"]
+    unapplied = 0
+
+    for action in plan:
+        if not args.apply:
+            verb = "would apply" if action.kind != "manual" else "manual"
+            print(f"[{verb}] {action.capability} / {action.harness}: {action.summary}")
+            if action.kind != "manual":
+                unapplied += 1
+            continue
+
+        adapter = harness_adapters[action.harness]
+        provider = PROVIDERS[action.capability.split(":", 1)[0]]
+        result = provider.apply(action, adapter)
+        provenance.emit(result)
+        tag = result.status.upper()
+        line = f"[{tag}] {action.capability} / {action.harness}: {result.detail or action.summary}"
+        if result.backup_path:
+            line += f"  (backup: {result.backup_path})"
+        print(line)
+        if result.status != "applied" and action.kind != "manual":
+            unapplied += 1
+
+    if not args.apply and auto:
+        print(f"\n{len(auto)} action(s) planned. Re-run with --apply to perform them.")
+    # Non-zero while automatically-fixable actions remain unapplied.
+    return 1 if unapplied else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -85,6 +144,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     doctor.set_defaults(func=_cmd_doctor)
+
+    rec = sub.add_parser(
+        "reconcile", help="bring harnesses to the manifest (dry-run unless --apply)"
+    )
+    rec.add_argument(
+        "-m", "--manifest", default="capabilities.toml", help="path to capabilities.toml"
+    )
+    rec.add_argument(
+        "--apply", action="store_true", help="perform the changes (default: dry-run)"
+    )
+    rec.set_defaults(func=_cmd_reconcile)
 
     return parser
 
