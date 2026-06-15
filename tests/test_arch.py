@@ -17,10 +17,10 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "agent_capability_broker"
 
 # Modules that form the stdlib-only truth path. As provider backends land, their
 # optional-import modules are added to ALLOWED_EXTRA, not here.
-CORE_MODULES = ["model.py", "cli.py"]
+CORE_MODULES = ["model.py", "cli.py", "adapters.py", "providers.py"]
 STDLIB_OK = {
     "__future__", "argparse", "ast", "dataclasses", "enum", "json",
-    "pathlib", "sys", "tomllib", "io", "contextlib",
+    "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing",
 }
 
 
