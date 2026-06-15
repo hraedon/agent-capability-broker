@@ -21,6 +21,7 @@ CORE_MODULES = ["model.py", "cli.py", "adapters.py", "providers.py", "provenance
 STDLIB_OK = {
     "__future__", "argparse", "ast", "dataclasses", "enum", "json",
     "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing", "datetime",
+    "subprocess",
 }
 
 

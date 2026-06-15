@@ -67,3 +67,8 @@ select = ["E", "F", "I", "W", "UP", "B"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# hvac (the optional [cred] backend) ships no type stubs.
+[[tool.mypy.overrides]]
+module = "hvac.*"
+ignore_missing_imports = true
