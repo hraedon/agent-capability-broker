@@ -47,6 +47,22 @@ class Capability:
 
 
 @dataclass(frozen=True)
+class McpServer:
+    """A normalized view of one MCP server across harness config formats.
+
+    Adapters translate each harness's native shape into this; providers read it
+    without knowing whether it came from Claude's `mcpServers` or opencode's
+    `mcp`. Carries no secret material (no headers/tokens) by construction.
+    """
+
+    name: str
+    kind: str                      # "local" | "remote" | "unknown"
+    command: tuple[str, ...]       # argv for local servers; () for remote
+    url: str | None = None         # endpoint for remote servers
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class Verdict:
     """The result of inspecting one capability for one harness (doctor row)."""
 

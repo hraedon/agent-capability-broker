@@ -14,25 +14,37 @@ import sys
 from pathlib import Path
 
 from .model import KNOWN_HARNESSES, ManifestError, Status, Verdict, parse_manifest
+from .providers import PROVIDERS, adapters
 
 
 def _inspect_all(manifest_path: Path) -> list[Verdict]:
-    """Compute a verdict per capability x listed harness.
+    """Compute a verdict per capability x harness by dispatching to providers.
 
-    Provider dispatch is not wired yet (Plan 001 WI-3): every listed harness is
-    reported UNKNOWN, and harnesses not listed for a capability are NOT_APPLICABLE.
-    The matrix shape and exit semantics are real now so callers can build on them.
+    For each capability, harnesses it lists are inspected by the capability's
+    provider (read-only); harnesses it does not list are NOT_APPLICABLE; a listed
+    harness whose config is absent is UNKNOWN. Matrix shape and exit semantics
+    are stable for callers/CI.
     """
     caps = parse_manifest(manifest_path)
+    harness_adapters = adapters()
     verdicts: list[Verdict] = []
     for cap in caps:
+        provider = PROVIDERS.get(cap.provider)
         for harness in sorted(KNOWN_HARNESSES):
-            if harness in cap.harnesses:
+            if harness not in cap.harnesses:
+                verdicts.append(Verdict(cap.id, harness, Status.NOT_APPLICABLE))
+                continue
+            adapter = harness_adapters.get(harness)
+            if provider is None:
                 verdicts.append(
-                    Verdict(cap.id, harness, Status.UNKNOWN, "provider inspect not yet wired")
+                    Verdict(cap.id, harness, Status.UNKNOWN, f"no provider {cap.provider!r}")
+                )
+            elif adapter is None or not adapter.available():
+                verdicts.append(
+                    Verdict(cap.id, harness, Status.UNKNOWN, f"no {harness} config found")
                 )
             else:
-                verdicts.append(Verdict(cap.id, harness, Status.NOT_APPLICABLE))
+                verdicts.append(provider.inspect(cap, harness, adapter))
     return verdicts
 
 
