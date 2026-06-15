@@ -48,10 +48,18 @@ already proven.
   to stdout or the model context. `get` is an explicit, warned escape hatch.
 - The `[cred]` extra (hvac) gates this; absent it, `exec` errors cleanly.
 
-## WI-5 — Provenance forwarder to regista / agent-provenance
+## WI-5 — Provenance forwarder to regista / agent-provenance — DEFERRED (2026-06-15)
 - Forward the local JSONL events to the regista sink when reachable; the local
   log stays the source of truth so an act never blocks on the sink being up.
   Turns a credential check-out / config reconcile into an attestable agent action.
+- **Deferred by decision (2026-06-15).** regista's `append_event` is
+  *work-item-scoped*: an event must attach to an existing `work_item_id` under a
+  workflow, with a DSN. Mapping a cred-checkout / reconcile onto that model is a
+  real coupling decision (which workflow? a per-host/session work item?), and is
+  really an agent-provenance design question — not a mechanical forward. The
+  local append-only JSONL provenance is functional in the meantime.
+- **Revisit trigger:** a defined "capability" / agent-action workflow exists in
+  regista or agent-provenance to attach these events to. Until then, parked.
 
 ## Safety invariants (apply to every WI)
 - **Dry-run is the default.** Mutation requires `--apply`.
