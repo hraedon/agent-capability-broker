@@ -31,6 +31,25 @@ def _backup(path: Path) -> Path:
     dest.write_bytes(path.read_bytes())
     return dest
 
+
+def _add_server(path: Path, container_key: str, name: str, entry: dict[str, object]) -> WriteResult:
+    """Add a new MCP server under `container_key`, creating file/container as
+    needed. Backs up an existing file first; refuses to clobber an existing
+    server of the same name (callers check existence for idempotence)."""
+    data = _load_json(path)
+    container = data.get(container_key)
+    if not isinstance(container, dict):
+        container = {}
+        data[container_key] = container
+    if name in container:
+        raise KeyError(f"server {name!r} already present in {container_key} of {path}")
+
+    backup = _backup(path) if path.exists() else None
+    container[name] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return WriteResult(changed=True, backup_path=backup)
+
 _REMOTE_TYPES = {"remote", "http", "sse"}
 
 
@@ -100,6 +119,11 @@ class ClaudeAdapter:
     def mcp_servers(self) -> dict[str, McpServer]:
         return _servers_from(_load_json(self.settings_path).get("mcpServers"))
 
+    def add_mcp_server(self, name: str, command: list[str]) -> WriteResult:
+        """Add a stdio MCP server to Claude's `mcpServers` (command/args shape)."""
+        entry: dict[str, object] = {"command": command[0], "args": list(command[1:])}
+        return _add_server(self.settings_path, "mcpServers", name, entry)
+
 
 class OpencodeAdapter:
     """opencode: `~/.config/opencode/opencode.json` -> `mcp`."""
@@ -140,3 +164,8 @@ class OpencodeAdapter:
         entry["command"] = argv
         self.config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return WriteResult(changed=True, backup_path=backup)
+
+    def add_mcp_server(self, name: str, command: list[str]) -> WriteResult:
+        """Add a local MCP server to opencode's `mcp` (type/enabled/command shape)."""
+        entry: dict[str, object] = {"type": "local", "enabled": True, "command": list(command)}
+        return _add_server(self.config_path, "mcp", name, entry)

@@ -191,7 +191,30 @@ class E2eProvider:
                 )
             ]
 
-        # No safe automatic fix yet (absent / no browsers / disabled): surface it.
+        # ABSENT: the harness exposes no Playwright at all. If browsers are present
+        # and the manifest pins a version, add a pinned wiring; otherwise surface
+        # the prerequisite as a manual step.
+        if verdict.status is Status.ABSENT:
+            installed, _ = _browsers_installed()
+            if not installed:
+                return [Action(
+                    cap.id, harness, "manual", "e2e",
+                    "no browser binaries; run `playwright install chromium` first",
+                )]
+            pin = cap.options.get("pin")
+            if not (isinstance(pin, str) and pin):
+                return [Action(
+                    cap.id, harness, "manual", "e2e",
+                    "set options.pin = \"<version>\" in the manifest to add a pinned wiring",
+                )]
+            command = ["npx", "-y", f"@playwright/mcp@{pin}", "--headless", "--isolated"]
+            return [Action(
+                cap.id, harness, "add_mcp", "playwright",
+                f"add a pinned Playwright MCP server to {harness}",
+                payload={"command": command},
+            )]
+
+        # No safe automatic fix (e.g. disabled / no browsers while wired): surface it.
         return [Action(cap.id, harness, "manual", cap.id, verdict.detail)]
 
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
@@ -208,6 +231,18 @@ class E2eProvider:
             return ActionResult(
                 action, "applied", f"pinned launcher to {' '.join(argv)}",
                 backup_path=str(res.backup_path),
+            )
+        if action.kind == "add_mcp":
+            if not isinstance(adapter, ClaudeAdapter | OpencodeAdapter):
+                return ActionResult(action, "skipped", "writing not supported for this harness")
+            if action.target in adapter.mcp_servers():
+                return ActionResult(action, "skipped", "already present")
+            raw = action.payload.get("command", [])
+            command = [str(x) for x in raw] if isinstance(raw, list) else []
+            res = adapter.add_mcp_server(action.target, command)
+            return ActionResult(
+                action, "applied", f"added '{action.target}' -> {' '.join(command)}",
+                backup_path=str(res.backup_path) if res.backup_path else None,
             )
         return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
 
