@@ -1,0 +1,69 @@
+[project]
+name = "agent-capability-broker"
+version = "0.1.0"
+description = "Keep agents at capability parity across harnesses (creds, E2E tooling) from one manifest"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "hraedon" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+# The deterministic core is stdlib-only by charter (tomllib, json, subprocess,
+# argparse). Provider backends are optional extras below.
+dependencies = []
+
+[project.optional-dependencies]
+# Pins include upper bounds to keep CI reproducible against future majors.
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.7,<1",
+    "mypy>=1.13,<2",
+]
+# The cred provider's Vault/HTTP client. The core never imports this; when
+# absent, `cred` inspect degrades to UNKNOWN with a reason instead of crashing.
+cred = [
+    "hvac>=2.1,<3",
+]
+# Optional narration layer, kept out of the truth path. Empty placeholder.
+narration = []
+
+[project.urls]
+Source = "https://github.com/hraedon/agent-capability-broker"
+Issues = "https://github.com/hraedon/agent-capability-broker/issues"
+
+[project.scripts]
+acb = "agent_capability_broker.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_capability_broker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "samples: requires copies of real harness configs in samples/ (skipped when absent)",
+    "cred: requires the [cred] extra (hvac) for Vault reachability checks",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

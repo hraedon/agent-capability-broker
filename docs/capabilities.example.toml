@@ -1,0 +1,16 @@
+# Example capability manifest — PLACEHOLDERS ONLY.
+# A real estate manifest (pointing at real Vault paths) is a config, not an
+# example: it is gitignored. Never commit one with real account names or paths.
+
+[capability."cred:svc-bot"]
+provider  = "cred"
+vault     = "kv/example/ad/svc-bot"   # a Vault path reference, not a secret
+field     = "password"
+harnesses = ["claude", "opencode"]
+
+[capability."e2e:chromium"]
+provider  = "e2e"
+engine    = "playwright"
+browser   = "chromium"
+backend   = "local"                    # or "remote" with an endpoint key
+harnesses = ["claude", "opencode"]
