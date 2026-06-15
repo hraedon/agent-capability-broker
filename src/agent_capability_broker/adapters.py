@@ -10,9 +10,26 @@ tokens.
 from __future__ import annotations
 
 import json
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .model import McpServer
+
+
+class WriteResult:
+    """Outcome of a surgical config write (act path)."""
+
+    def __init__(self, changed: bool, backup_path: Path | None) -> None:
+        self.changed = changed
+        self.backup_path = backup_path
+
+
+def _backup(path: Path) -> Path:
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    dest = path.with_name(f"{path.name}.bak-{ts}")
+    dest.write_bytes(path.read_bytes())
+    return dest
 
 _REMOTE_TYPES = {"remote", "http", "sse"}
 
@@ -71,7 +88,11 @@ class ClaudeAdapter:
     name = "claude"
 
     def __init__(self, settings_path: Path | None = None) -> None:
-        self.settings_path = settings_path or (Path.home() / ".claude" / "settings.json")
+        env = os.environ.get("ACB_CLAUDE_SETTINGS")
+        self.settings_path = (
+            settings_path
+            or (Path(env) if env else Path.home() / ".claude" / "settings.json")
+        )
 
     def available(self) -> bool:
         return self.settings_path.is_file()
@@ -86,8 +107,10 @@ class OpencodeAdapter:
     name = "opencode"
 
     def __init__(self, config_path: Path | None = None) -> None:
-        self.config_path = config_path or (
-            Path.home() / ".config" / "opencode" / "opencode.json"
+        env = os.environ.get("ACB_OPENCODE_CONFIG")
+        self.config_path = (
+            config_path
+            or (Path(env) if env else Path.home() / ".config" / "opencode" / "opencode.json")
         )
 
     def available(self) -> bool:
@@ -95,3 +118,25 @@ class OpencodeAdapter:
 
     def mcp_servers(self) -> dict[str, McpServer]:
         return _servers_from(_load_json(self.config_path).get("mcp"))
+
+    def write_command(self, server: str, argv: list[str]) -> WriteResult:
+        """Surgically set one MCP server's `command`, preserving everything else.
+
+        Backs the file up first, is a no-op when already equal (idempotent), and
+        only ever touches the targeted server's `command` key — so sibling
+        servers (and any bearer tokens/headers they hold) survive byte-for-byte
+        in value. Raises if the server is absent or the config is unparseable.
+        """
+        data = _load_json(self.config_path)
+        mcp = data.get("mcp")
+        if not isinstance(mcp, dict) or server not in mcp or not isinstance(mcp[server], dict):
+            raise KeyError(f"opencode mcp server {server!r} not found in {self.config_path}")
+
+        entry = mcp[server]
+        if entry.get("command") == argv:
+            return WriteResult(changed=False, backup_path=None)
+
+        backup = _backup(self.config_path)
+        entry["command"] = argv
+        self.config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return WriteResult(changed=True, backup_path=backup)

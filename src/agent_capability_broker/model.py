@@ -72,6 +72,30 @@ class Verdict:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class Action:
+    """A declarative, planned change toward `PRESENT_OK`. The same object is
+    printed in the dry-run plan and recorded in provenance — so what is shown is
+    exactly what is (or would be) done. Payload carries no secret material."""
+
+    capability: str
+    harness: str
+    kind: str                                      # e.g. "pin_npx_version", "manual"
+    target: str                                    # server/config key the action touches
+    summary: str                                   # human-readable, secret-free
+    payload: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    """Outcome of applying (or declining to apply) one Action."""
+
+    action: Action
+    status: str                                    # "applied" | "skipped" | "failed"
+    detail: str = ""
+    backup_path: str | None = None
+
+
 def parse_manifest(path: Path) -> list[Capability]:
     """Parse and validate capabilities.toml into Capability objects.
 

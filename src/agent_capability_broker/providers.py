@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .adapters import ClaudeAdapter, OpencodeAdapter
-from .model import Capability, McpServer, Status, Verdict
+from .model import Action, ActionResult, Capability, McpServer, Status, Verdict
 
 _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webkit")
 
@@ -32,6 +32,10 @@ class Provider(Protocol):
     name: str
 
     def inspect(self, cap: Capability, harness: str, adapter: HarnessAdapter) -> Verdict: ...
+    def plan_reconcile(
+        self, cap: Capability, harness: str, adapter: HarnessAdapter
+    ) -> list[Action]: ...
+    def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult: ...
 
 
 def _browser_cache() -> Path:
@@ -76,6 +80,30 @@ def _find_playwright(servers: dict[str, McpServer]) -> McpServer | None:
         if "playwright" in haystack:
             return s
     return None
+
+
+def _pin_package(token: str, pin: str) -> str:
+    """Set a package token's version to `pin`, preserving an `@scope/name`.
+
+    A version separator is an `@` that is not the leading scope marker.
+    "@playwright/mcp@latest" -> "@playwright/mcp@<pin>"; "pkg" -> "pkg@<pin>".
+    """
+    at = token.rfind("@")
+    base = token[:at] if at > 0 else token
+    return f"{base}@{pin}"
+
+
+def _pin_argv(command: tuple[str, ...], pin: str) -> list[str]:
+    """Return argv with the (first) playwright package token pinned to `pin`."""
+    out: list[str] = []
+    pinned = False
+    for tok in command:
+        if not pinned and not tok.startswith("-") and "playwright" in tok.lower():
+            out.append(_pin_package(tok, pin))
+            pinned = True
+        else:
+            out.append(tok)
+    return out
 
 
 class E2eProvider:
@@ -125,6 +153,60 @@ class E2eProvider:
             f"Playwright server '{server.name}' wired; browsers at {cache}",
         )
 
+    def plan_reconcile(
+        self, cap: Capability, harness: str, adapter: HarnessAdapter
+    ) -> list[Action]:
+        verdict = self.inspect(cap, harness, adapter)
+        if verdict.status in (Status.PRESENT_OK, Status.NOT_APPLICABLE, Status.UNKNOWN):
+            return []
+
+        server = _find_playwright(adapter.mcp_servers())
+        # The one case with a safe automatic fix: a wired-but-floating npx launcher.
+        if (
+            verdict.status is Status.PRESENT_BROKEN
+            and server is not None
+            and server.enabled
+            and _floating_npx_tag(server.command) is not None
+        ):
+            pin = cap.options.get("pin")
+            if isinstance(pin, str) and pin:
+                argv = _pin_argv(server.command, pin)
+                return [
+                    Action(
+                        cap.id, harness, "pin_npx_version", server.name,
+                        f"pin '{server.name}' launcher to a fixed version "
+                        f"(removes the per-start registry resolution)",
+                        payload={"argv": argv},
+                    )
+                ]
+            return [
+                Action(
+                    cap.id, harness, "manual", server.name,
+                    "wired via a floating npx tag; set options.pin = \"<version>\" in the "
+                    "manifest (or backend = \"remote\") to enable an automatic fix",
+                )
+            ]
+
+        # No safe automatic fix yet (absent / no browsers / disabled): surface it.
+        return [Action(cap.id, harness, "manual", cap.id, verdict.detail)]
+
+    def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
+        if action.kind == "manual":
+            return ActionResult(action, "skipped", "manual action — no automatic apply")
+        if action.kind == "pin_npx_version":
+            if not isinstance(adapter, OpencodeAdapter):
+                return ActionResult(action, "skipped", "writing is wired for opencode only")
+            raw = action.payload.get("argv", [])
+            argv = [str(x) for x in raw] if isinstance(raw, list) else []
+            res = adapter.write_command(action.target, argv)
+            if not res.changed:
+                return ActionResult(action, "skipped", "already pinned")
+            return ActionResult(
+                action, "applied", f"pinned launcher to {' '.join(argv)}",
+                backup_path=str(res.backup_path),
+            )
+        return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
+
 
 class CredProvider:
     """Vault-backed AD/service-account creds. Inspect = reachability of the
@@ -141,6 +223,15 @@ class CredProvider:
             cap.id, harness, Status.UNKNOWN,
             "cred reachability check not yet wired (needs [cred] extra + Vault auth)",
         )
+
+    def plan_reconcile(
+        self, cap: Capability, harness: str, adapter: HarnessAdapter
+    ) -> list[Action]:
+        # cred exec/inject is Plan 002 WI-4; nothing to reconcile in configs yet.
+        return []
+
+    def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
+        return ActionResult(action, "skipped", "cred act path not yet implemented (WI-4)")
 
 
 PROVIDERS: dict[str, Provider] = {
