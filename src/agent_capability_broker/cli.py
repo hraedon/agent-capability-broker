@@ -133,6 +133,36 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     return 1 if unapplied else 0
 
 
+def _cmd_exec(args: argparse.Namespace) -> int:
+    try:
+        caps = parse_manifest(Path(args.manifest))
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    cap = next((c for c in caps if c.id == args.capability), None)
+    if cap is None:
+        print(f"error: capability {args.capability!r} not in manifest", file=sys.stderr)
+        return 2
+    provider = PROVIDERS.get(cap.provider)
+    if provider is None:
+        print(f"error: no provider {cap.provider!r}", file=sys.stderr)
+        return 2
+
+    argv = list(args.argv)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        print("error: no command (usage: acb exec <cap> -- <cmd…>)", file=sys.stderr)
+        return 2
+
+    try:
+        return provider.exec(cap, argv)
+    except (RuntimeError, NotImplementedError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -155,6 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply", action="store_true", help="perform the changes (default: dry-run)"
     )
     rec.set_defaults(func=_cmd_reconcile)
+
+    ex = sub.add_parser(
+        "exec", help="run a command with a capability injected (never surfaced)"
+    )
+    ex.add_argument(
+        "-m", "--manifest", default="capabilities.toml", help="path to capabilities.toml"
+    )
+    ex.add_argument("capability", help="capability id, e.g. cred:svc-bot")
+    ex.add_argument("argv", nargs=argparse.REMAINDER, help="-- command and args to run")
+    ex.set_defaults(func=_cmd_exec)
 
     return parser
 

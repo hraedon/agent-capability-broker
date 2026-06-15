@@ -1,20 +1,23 @@
-"""Providers. Stdlib-only core (inspect path).
+"""Providers. Stdlib-only core (inspect/reconcile/exec dispatch).
 
-A provider implements the four operations from the design spine; this module
-ships the read-only `inspect` for the first two providers. The act-path methods
-(`plan_reconcile`/`apply`/`exec`) raise until Plan 002 so the mutating,
-secret-handling code lands under its own review.
+A provider implements the four spine operations: `inspect` (read-only),
+`plan_reconcile` + `apply` (the gated config act path), and `exec` (inject a
+capability into a child process). The Vault backend used by `cred.exec` is an
+optional extra imported lazily from `cred_vault`, so this module stays
+stdlib-only.
 
-`inspect` is side-effect-free: it reads adapter wiring + cheap local signals and
-never launches a credential use or surfaces a secret.
+`inspect` is side-effect-free; `exec` injects a secret into the child's
+environment and never returns it to stdout or the model context.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Protocol
 
+from . import provenance
 from .adapters import ClaudeAdapter, OpencodeAdapter
 from .model import Action, ActionResult, Capability, McpServer, Status, Verdict
 
@@ -36,6 +39,7 @@ class Provider(Protocol):
         self, cap: Capability, harness: str, adapter: HarnessAdapter
     ) -> list[Action]: ...
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult: ...
+    def exec(self, cap: Capability, argv: list[str]) -> int: ...
 
 
 def _browser_cache() -> Path:
@@ -207,6 +211,21 @@ class E2eProvider:
             )
         return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
 
+    def exec(self, cap: Capability, argv: list[str]) -> int:
+        raise NotImplementedError(
+            "e2e exec (running a command against a provisioned browser) is not yet "
+            "implemented; use `reconcile` to fix wiring"
+        )
+
+
+def _inject_var(field: str, mapping: object) -> str:
+    """Env var name for a resolved field: an explicit mapping wins, else FIELD."""
+    if isinstance(mapping, dict):
+        override = mapping.get(field)
+        if isinstance(override, str) and override:
+            return override
+    return field.upper()
+
 
 class CredProvider:
     """Vault-backed AD/service-account creds. Inspect = reachability of the
@@ -231,7 +250,61 @@ class CredProvider:
         return []
 
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
-        return ActionResult(action, "skipped", "cred act path not yet implemented (WI-4)")
+        return ActionResult(action, "skipped", "cred reconcile not applicable")
+
+    def _resolve(self, cap: Capability) -> dict[str, str]:
+        """Return the capability's secret field(s). Source-pluggable.
+
+        `vault` (default) brokers via Vault (optional [cred] extra); `env` reads
+        an already-present environment variable (lightweight / testing). Either
+        way the value is returned only to `exec`, never to the model context.
+        """
+        source = str(cap.options.get("source", "vault"))
+        if source == "env":
+            var = cap.options.get("from_env")
+            if not isinstance(var, str) or not var:
+                raise RuntimeError(f"{cap.id}: source 'env' requires options.from_env")
+            if var not in os.environ:
+                raise RuntimeError(f"{cap.id}: env var ${var} is not set")
+            field = str(cap.options.get("field", "password"))
+            return {field: os.environ[var]}
+        if source == "vault":
+            from . import cred_vault  # lazy: keeps the [cred] extra optional
+
+            return cred_vault.resolve(cap)
+        raise RuntimeError(f"{cap.id}: unknown cred source {source!r}")
+
+    def exec(self, cap: Capability, argv: list[str]) -> int:
+        """Run `argv` with the resolved secret(s) injected into its environment.
+
+        Inject-don't-surface: the secret is placed only in the child's env (per
+        `options.inject`, else the upper-cased field name); it is never written
+        to stdout, the provenance event, or the model context. Returns the
+        child's exit code.
+        """
+        if not argv:
+            raise ValueError("exec requires a command after '--'")
+
+        fields = self._resolve(cap)
+        mapping = cap.options.get("inject")
+        child_env = os.environ.copy()
+        injected: list[str] = []
+        for field, value in fields.items():
+            var = _inject_var(field, mapping)
+            child_env[var] = value
+            injected.append(var)
+
+        result = subprocess.run(argv, env=child_env)  # noqa: S603 (intentional exec)
+
+        # Provenance records the act and which env vars were set — never a value.
+        action = Action(
+            cap.id, "local", "exec", cap.id,
+            f"injected {sorted(injected)} into child '{argv[0]}'",
+        )
+        provenance.emit(
+            ActionResult(action, "applied", f"child exited {result.returncode}")
+        )
+        return result.returncode
 
 
 PROVIDERS: dict[str, Provider] = {
