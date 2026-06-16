@@ -21,8 +21,7 @@ each harness against one declarative manifest.
 
 A capability is named `provider:name`:
 
-- `cred:svc-gpolens` — the gpo-lens service-account credential, via the `cred`
-  provider.
+- `cred:svc-bot` — a service-account credential, via the `cred` provider.
 - `e2e:chromium` — a Chromium browser for E2E, via the `e2e` provider.
 
 `provider` selects the implementation; `name` is unique within a provider and is

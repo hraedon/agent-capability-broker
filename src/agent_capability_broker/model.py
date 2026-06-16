@@ -121,6 +121,12 @@ def parse_manifest(path: Path) -> list[Capability]:
                 f"capability {cap_id!r}: unknown or missing provider {provider!r} "
                 f"(known: {sorted(KNOWN_PROVIDERS)})"
             )
+        id_prefix = cap_id.split(":", 1)[0] if ":" in cap_id else None
+        if id_prefix and id_prefix != provider:
+            raise ManifestError(
+                f"capability {cap_id!r}: ID prefix {id_prefix!r} does not match "
+                f"declared provider {provider!r}"
+            )
         harnesses = body.get("harnesses")
         if not isinstance(harnesses, list) or not harnesses:
             raise ManifestError(f"capability {cap_id!r}: 'harnesses' must be a non-empty list")

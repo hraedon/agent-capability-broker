@@ -26,7 +26,7 @@ things:
 Two real pains, one shape:
 
 1. **Credentials.** Agents increasingly need real creds (AD binds, service
-   accounts, the cert-watch VM). The fix so far has been per-secret Vault
+   accounts, a remote VM). The fix so far has been per-secret Vault
    AppRoles delivered as `.env` files — better than plaintext, but still
    hand-placed per harness, and a secret in a transcript is a leaked secret.
 2. **E2E tooling.** opencode agents complain "no Playwright" while Claude Code
@@ -86,7 +86,7 @@ and reconciles reality to it.
 
 ## Boundary with sibling tools
 
-- **Vault / the homelab AppRoles** are the credential *backend*; `acb`'s `cred`
+- **Vault / the self-hosted AppRoles** are the credential *backend*; `acb`'s `cred`
   provider authenticates to them (k8s auth → AppRole `.env` → `VAULT_TOKEN`) and
   brokers access. `acb` replaces the hand-placed `.env` *distribution*, not Vault.
 - **regista / agent-provenance** receive `acb`'s provenance events; a brokered

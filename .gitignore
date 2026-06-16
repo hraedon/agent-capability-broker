@@ -6,7 +6,6 @@ capabilities.toml          # a real estate manifest is a config, not an example
 
 # Vault / credential material — must never land in the tree
 *.env
-.cw-vault-ci.env
 *-vault*.env
 
 # Local runtime data

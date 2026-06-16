@@ -115,8 +115,17 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
                 unapplied += 1
             continue
 
-        adapter = harness_adapters[action.harness]
-        provider = PROVIDERS[action.capability.split(":", 1)[0]]
+        adapter = harness_adapters.get(action.harness)
+        if adapter is None or not adapter.available():
+            print(f"[SKIP] {action.capability} / {action.harness}: adapter unavailable")
+            unapplied += 1
+            continue
+        provider_name = action.capability.split(":", 1)[0]
+        provider = PROVIDERS.get(provider_name)
+        if provider is None:
+            print(f"[SKIP] {action.capability} / {action.harness}: no provider {provider_name!r}")
+            unapplied += 1
+            continue
         result = provider.apply(action, adapter)
         provenance.emit(result)
         tag = result.status.upper()

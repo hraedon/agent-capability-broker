@@ -36,7 +36,7 @@ important rule here. Read the Hard rules.
   - `reconcile` / `exec` / any `apply` mutate config or touch secrets. They are
     **dry-run by default** (`--apply` to act), **back up** a config before
     writing it, are **idempotent**, and **never clobber a secret already present**
-    in a harness config (the cert-watch web.config-no-clobber lesson). Every
+    in a harness config (the config-no-clobber lesson from a sibling tool). Every
     acting verb **emits a provenance event**.
 - **Inject, don't surface.** The default credential verb injects into the child
   process (env / short-lived temp file) and never returns the secret to the
