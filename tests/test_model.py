@@ -45,3 +45,9 @@ def test_empty_manifest_rejected(tmp_path: Path) -> None:
     p = _write(tmp_path, "# nothing here\n")
     with pytest.raises(ManifestError, match="no .* entries"):
         parse_manifest(p)
+
+
+def test_id_prefix_mismatch_rejected(tmp_path: Path) -> None:
+    p = _write(tmp_path, '[capability."cred:svc-bot"]\nprovider = "e2e"\nharnesses = ["claude"]\n')
+    with pytest.raises(ManifestError, match="ID prefix .* does not match"):
+        parse_manifest(p)

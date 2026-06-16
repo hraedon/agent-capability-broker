@@ -44,7 +44,7 @@ def _authenticate(client: object) -> None:
 
 
 def _split_mount(path: str) -> tuple[str, str]:
-    """`kv/homelab/ad/svc-bot` -> (`kv`, `homelab/ad/svc-bot`)."""
+    """`kv/example/ad/svc-bot` -> (`kv`, `example/ad/svc-bot`)."""
     head, _, tail = path.partition("/")
     if not head or not tail:
         raise RuntimeError(f"vault path {path!r} must be '<mount>/<path>'")
@@ -81,8 +81,6 @@ def resolve(cap: Capability) -> dict[str, str]:
     out: dict[str, str] = {}
     if field in data:
         out[field] = str(data[field])
-    if "username" in data and "username" != field:
-        out["username"] = str(data["username"])
     if not out:
         raise RuntimeError(f"field {field!r} not found at {path}")
     return out

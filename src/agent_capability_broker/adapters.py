@@ -1,10 +1,13 @@
-"""Harness adapters (read side). Stdlib-only.
+"""Harness adapters. Stdlib-only.
 
 Each adapter encapsulates one harness's config format and exposes a normalized
-view (`McpServer`) so providers stay harness-agnostic. Read-only by charter:
-nothing here writes a config or extracts a secret value — only the fields needed
-to decide whether a capability is wired (command/url/enabled), never headers or
-tokens.
+view (`McpServer`) so providers stay harness-agnostic. The read side
+(mcp_servers, available) is used by inspect/doctor; the write side
+(write_command, add_mcp_server) is used by the act path (reconcile --apply).
+
+Read operations never surface secret values — only the fields needed to decide
+whether a capability is wired (command/url/enabled), never headers or tokens.
+Write operations are gated behind the act path: backup-first, no-secret-clobber.
 """
 
 from __future__ import annotations
@@ -28,6 +31,8 @@ class WriteResult:
 def _backup(path: Path) -> Path:
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     dest = path.with_name(f"{path.name}.bak-{ts}")
+    if dest.exists():
+        dest = path.with_name(f"{path.name}.bak-{ts}-{os.urandom(4).hex()}")
     dest.write_bytes(path.read_bytes())
     return dest
 
@@ -56,7 +61,12 @@ _REMOTE_TYPES = {"remote", "http", "sse"}
 def _load_json(path: Path) -> dict[str, object]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError:
+        return {}
+    except json.JSONDecodeError as exc:
+        import sys
+
+        print(f"warning: {path}: corrupted JSON ({exc}); treating as empty", file=sys.stderr)
         return {}
     return data if isinstance(data, dict) else {}
 

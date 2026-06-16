@@ -75,4 +75,4 @@ already proven.
 ## Definition of done (per slice; push branch + watch CI)
 - WI-2 first: `acb reconcile --apply` against a *copy* of this host's
   opencode.json rewrites `@playwright/mcp@latest` → a pinned version, leaving the
-  z.ai server's bearer token intact, and a re-run is a no-op. CI green 3.12+3.13.
+  a sibling server's bearer token intact, and a re-run is a no-op. CI green 3.12+3.13.
