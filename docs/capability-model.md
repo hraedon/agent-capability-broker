@@ -105,10 +105,13 @@ exec(cap, argv)                       -> int           # injects secret; emits p
 First two providers:
 
 - **`cred`** — Vault-backed AD/service-account credentials. Auth resolves inside
-  the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`. `inspect`
-  checks the harness can *reach* the broker (token self-lookup), not that a
-  specific secret is readable (that would be a use). The HTTP/Vault client is an
-  optional extra; the core never imports it.
+  the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`. Because cred
+  has no per-harness config artifact, discoverability has **two axes** (Plan 004):
+  a cred is `ABSENT` in a harness until that harness exposes a command/skill shim
+  surfacing `acb exec cred:<name>`, and once present, a read-only **broker
+  reachability** check (token self-lookup — not a secret read, which would be a
+  use) decides `PRESENT_OK` vs `PRESENT_BROKEN`. `plan_reconcile` renders the
+  missing shim. The HTTP/Vault client is an optional extra; the core never imports it.
 - **`e2e`** — Playwright/browser capability. `inspect` checks the browser binary
   or remote endpoint is reachable and launchable headless. `plan_reconcile` for
   an `ABSENT`/`PRESENT_BROKEN` Chromium might be: install browser binaries, or

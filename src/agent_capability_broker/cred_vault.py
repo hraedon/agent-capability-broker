@@ -51,6 +51,31 @@ def _split_mount(path: str) -> tuple[str, str]:
     return head, tail
 
 
+def reachable(cap: Capability) -> bool:
+    """Read-only broker reachability: authenticate, then a **token self-lookup**
+    only — never reads the capability's secret (that would be a *use*, spine §4).
+
+    Raises `RuntimeError` when reachability cannot be determined (no `[cred]`
+    extra, no `VAULT_ADDR`, or auth fails) so the caller maps it to `UNKNOWN`
+    rather than over-claiming a verdict.
+    """
+    try:
+        import hvac
+    except ImportError as exc:
+        raise RuntimeError(
+            "cred reachability needs the [cred] extra: "
+            "pip install 'agent-capability-broker[cred]'"
+        ) from exc
+
+    addr = os.environ.get("VAULT_ADDR")
+    if not addr:
+        raise RuntimeError("VAULT_ADDR is not set")
+
+    client = hvac.Client(url=addr, token=os.environ.get("VAULT_TOKEN"))
+    _authenticate(client)
+    return bool(client.is_authenticated())  # token self-lookup; no secret read
+
+
 def resolve(cap: Capability) -> dict[str, str]:
     """Read the capability's secret field(s) from Vault (KV v2)."""
     try:
