@@ -123,11 +123,28 @@ class ClaudeAdapter:
             or (Path(env) if env else Path.home() / ".claude" / "settings.json")
         )
 
+    @property
+    def shims_path(self) -> Path:
+        """Where Claude keeps skill shims: a `skills/` dir beside settings.json."""
+        return self.settings_path.parent / "skills"
+
     def available(self) -> bool:
         return self.settings_path.is_file()
 
     def mcp_servers(self) -> dict[str, McpServer]:
         return _servers_from(_load_json(self.settings_path).get("mcpServers"))
+
+    def command_shims(self) -> set[str]:
+        """Skill names this harness advertises: `skills/<name>/SKILL.md` dirs.
+
+        A directory is only an exposed skill if it actually holds a `SKILL.md`; a
+        bare directory is ignored. Read-only — only names are enumerated, never
+        the shim bodies. Missing `skills/` dir => empty set, not an error.
+        """
+        skills = self.shims_path
+        if not skills.is_dir():
+            return set()
+        return {d.name for d in skills.iterdir() if (d / "SKILL.md").is_file()}
 
     def add_mcp_server(self, name: str, command: list[str]) -> WriteResult:
         """Add a stdio MCP server to Claude's `mcpServers` (command/args shape)."""
@@ -147,11 +164,27 @@ class OpencodeAdapter:
             or (Path(env) if env else Path.home() / ".config" / "opencode" / "opencode.json")
         )
 
+    @property
+    def shims_path(self) -> Path:
+        """Where opencode keeps command shims: a `command/` dir beside the config."""
+        return self.config_path.parent / "command"
+
     def available(self) -> bool:
         return self.config_path.is_file()
 
     def mcp_servers(self) -> dict[str, McpServer]:
         return _servers_from(_load_json(self.config_path).get("mcp"))
+
+    def command_shims(self) -> set[str]:
+        """Command names this harness advertises: `command/<name>.md` file stems.
+
+        Read-only — only names are enumerated, never the shim bodies. A missing
+        `command/` dir yields an empty set rather than an error.
+        """
+        cmd_dir = self.shims_path
+        if not cmd_dir.is_dir():
+            return set()
+        return {p.stem for p in cmd_dir.glob("*.md") if p.is_file()}
 
     def write_command(self, server: str, argv: list[str]) -> WriteResult:
         """Surgically set one MCP server's `command`, preserving everything else.

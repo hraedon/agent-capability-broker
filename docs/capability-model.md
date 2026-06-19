@@ -131,6 +131,11 @@ exposed_tools()      -> set[str]              # what the harness currently adver
 - **opencode** — reads `~/.config/opencode/opencode.json` (`mcp` blocks,
   `command` shims).
 
+The MCP capability layer is read via `mcp_servers()`; `exposed_tools()`'s concrete
+realization is `command_shims()` — the command/skill shim surface (opencode
+`command/*.md`, Claude `skills/<name>/SKILL.md`) — reported by `acb shims`
+(Plan 003). Rendering a *missing* shim into a harness is a future act-path slice.
+
 Adapters must assume configs are **secret-bearing** (live bearer tokens, Vault
 material). They may read freely for diffing; they may write only through the
 gated act path, which backs the file up first and refuses to overwrite a secret
