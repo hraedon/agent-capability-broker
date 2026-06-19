@@ -55,6 +55,17 @@ def _add_server(path: Path, container_key: str, name: str, entry: dict[str, obje
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return WriteResult(changed=True, backup_path=backup)
 
+def _create_file(path: Path, content: str) -> WriteResult:
+    """Write `content` to a new file, creating parents. Refuses to clobber an
+    existing file (callers check existence for idempotence — mirrors `_add_server`).
+    A freshly created file has nothing to back up."""
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite existing shim {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return WriteResult(changed=True, backup_path=None)
+
+
 _REMOTE_TYPES = {"remote", "http", "sse"}
 
 
@@ -151,6 +162,11 @@ class ClaudeAdapter:
         entry: dict[str, object] = {"command": command[0], "args": list(command[1:])}
         return _add_server(self.settings_path, "mcpServers", name, entry)
 
+    def write_skill_shim(self, name: str, content: str) -> WriteResult:
+        """Render a skill shim at `skills/<name>/SKILL.md`. Create-only (refuses to
+        overwrite a hand-edited shim); callers guard on `command_shims()`."""
+        return _create_file(self.shims_path / name / "SKILL.md", content)
+
 
 class OpencodeAdapter:
     """opencode: `~/.config/opencode/opencode.json` -> `mcp`."""
@@ -212,3 +228,8 @@ class OpencodeAdapter:
         """Add a local MCP server to opencode's `mcp` (type/enabled/command shape)."""
         entry: dict[str, object] = {"type": "local", "enabled": True, "command": list(command)}
         return _add_server(self.config_path, "mcp", name, entry)
+
+    def write_command_shim(self, name: str, content: str) -> WriteResult:
+        """Render a command shim at `command/<name>.md`. Create-only (refuses to
+        overwrite a hand-edited shim); callers guard on `command_shims()`."""
+        return _create_file(self.shims_path / f"{name}.md", content)

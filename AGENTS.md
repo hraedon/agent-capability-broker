@@ -76,7 +76,10 @@ A provider implements: `inspect` (read-only status for a capability×harness),
 
 - **`cred`** — brokers Vault-backed AD/service-account creds. Auth resolution
   *inside* the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`.
-  Least-privilege lives in Vault policy, not here.
+  Least-privilege lives in Vault policy, not here. Discoverability (Plan 004): a
+  cred is `ABSENT` in a harness until a command/skill shim surfaces `acb exec
+  cred:<name>` there; `reconcile` renders it, broker reachability (token
+  self-lookup) gives `PRESENT_OK`/`PRESENT_BROKEN`.
 - **`e2e`** — provisions/locates a Playwright browser (local install or a remote
   endpoint) and exposes it to a harness without a fragile per-session `npx` MCP.
 

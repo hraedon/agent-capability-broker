@@ -265,30 +265,132 @@ def _inject_var(field: str, mapping: object) -> str:
     return field.upper()
 
 
-class CredProvider:
-    """Vault-backed AD/service-account creds. Inspect = reachability of the
-    broker (token self-lookup), never a secret read. The Vault client is the
-    optional [cred] extra; absent it, inspect degrades to UNKNOWN, never crashes.
+def _cred_shim_name(cap: Capability) -> str:
+    """The command/skill shim that surfaces `acb exec <cap>` to a harness.
 
-    The reachability path lands in Plan 001 WI-3 follow-up; for now it reports
-    UNKNOWN with the reason so `doctor` is honest about what it didn't check."""
+    Derived from the capability id (`cred:svc-bot` -> `cred-svc-bot`), overridable
+    via `options.shim`. This is the discoverability artifact `doctor` looks for.
+    """
+    shim = cap.options.get("shim")
+    if isinstance(shim, str) and shim:
+        return shim
+    return cap.id.replace(":", "-")
+
+
+def _render_cred_shim(cap: Capability, harness: str, shim: str) -> str:
+    """Markdown for a cred discovery shim. Carries **no secret** — only the
+    capability id and the inject-don't-surface invocation pattern. Frontmatter
+    matches each harness: Claude `SKILL.md` needs `name:`, opencode does not.
+    """
+    desc = (
+        f"Run a command with the {cap.id} credential injected by acb "
+        f"(inject-don't-surface — the secret reaches the child's environment, never "
+        f"stdout or your context). Use when a tool needs {cap.id}."
+    )
+    body = f"""# {shim} — broker {cap.id}
+
+`{cap.id}` is brokered by **agent-capability-broker**; it is not stored in this
+harness. To run a tool with it, shell out to `acb exec` — the credential is
+injected into the child process's environment and **never** printed or returned
+to your context:
+
+```
+acb exec {cap.id} -- <command> [args...]
+```
+
+Do not read or echo the secret. `acb doctor` reports whether this capability is
+present and the broker reachable; `acb reconcile` (re)renders this shim.
+"""
+    if harness == "claude":
+        front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
+    else:
+        front = f'---\ndescription: "{desc}"\n---\n\n'
+    return front + body
+
+
+class CredProvider:
+    """Vault-backed AD/service-account creds.
+
+    Discoverability has two axes (Plan 004): a credential is *discoverable* in a
+    harness iff that harness exposes a command/skill shim surfacing `acb exec
+    cred:<name>` (the ABSENT axis), and *working* iff the broker is reachable via
+    a read-only token self-lookup (the PRESENT_OK vs PRESENT_BROKEN axis). The
+    Vault client is the optional [cred] extra; absent it (or absent Vault env),
+    reachability degrades to UNKNOWN with a reason — never a crash."""
 
     name = "cred"
 
+    def _reachability(self, cap: Capability) -> tuple[Status, str]:
+        """Read-only broker reachability -> (status, detail). Never reads a secret;
+        any failure is mapped to UNKNOWN so `doctor` stays honest and robust."""
+        source = str(cap.options.get("source", "vault"))
+        if source == "env":
+            var = cap.options.get("from_env")
+            if isinstance(var, str) and var in os.environ:
+                return Status.PRESENT_OK, f"source 'env': ${var} is set"
+            return Status.PRESENT_BROKEN, f"source 'env': ${var or '?'} is not set"
+        if source != "vault":
+            return Status.UNKNOWN, f"unknown cred source {source!r}"
+        try:
+            from . import cred_vault  # lazy: keeps the [cred] extra optional
+
+            ok = cred_vault.reachable(cap)
+        except Exception as exc:  # best-effort: never let a probe break doctor
+            return Status.UNKNOWN, f"broker reachability not checked ({exc})"
+        if ok:
+            return Status.PRESENT_OK, "broker reachable (token self-lookup)"
+        return Status.PRESENT_BROKEN, "broker unreachable (token self-lookup failed)"
+
     def inspect(self, cap: Capability, harness: str, adapter: HarnessAdapter) -> Verdict:
-        return Verdict(
-            cap.id, harness, Status.UNKNOWN,
-            "cred reachability check not yet wired (needs [cred] extra + Vault auth)",
-        )
+        shim = _cred_shim_name(cap)
+        if shim not in adapter.command_shims():
+            return Verdict(
+                cap.id, harness, Status.ABSENT,
+                f"no '{shim}' shim in {harness}: an agent there can't discover "
+                f"`acb exec {cap.id}`",
+            )
+        status, detail = self._reachability(cap)
+        return Verdict(cap.id, harness, status, f"'{shim}' shim present; {detail}")
 
     def plan_reconcile(
         self, cap: Capability, harness: str, adapter: HarnessAdapter
     ) -> list[Action]:
-        # cred exec/inject is Plan 002 WI-4; nothing to reconcile in configs yet.
+        shim = _cred_shim_name(cap)
+        if shim not in adapter.command_shims():
+            content = _render_cred_shim(cap, harness, shim)
+            return [Action(
+                cap.id, harness, "add_cred_shim", shim,
+                f"add a '{shim}' discovery shim to {harness} (surfaces `acb exec {cap.id}`)",
+                payload={"content": content},
+            )]
+        # Shim present: discoverability is satisfied. An unreachable broker is an
+        # infra/auth problem, not something a config write can fix — surface it.
+        status, detail = self._reachability(cap)
+        if status is Status.PRESENT_BROKEN:
+            return [Action(
+                cap.id, harness, "manual", shim,
+                f"broker unreachable for {cap.id}: {detail} — fix Vault/auth, not a shim",
+            )]
         return []
 
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
-        return ActionResult(action, "skipped", "cred reconcile not applicable")
+        if action.kind == "manual":
+            return ActionResult(action, "skipped", "manual action — no automatic apply")
+        if action.kind != "add_cred_shim":
+            return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
+        if action.target in adapter.command_shims():
+            return ActionResult(action, "skipped", "shim already present")
+        content = str(action.payload.get("content", ""))
+        if isinstance(adapter, OpencodeAdapter):
+            res = adapter.write_command_shim(action.target, content)
+        elif isinstance(adapter, ClaudeAdapter):
+            res = adapter.write_skill_shim(action.target, content)
+        else:
+            return ActionResult(action, "skipped", "shim rendering not supported for this harness")
+        return ActionResult(
+            action, "applied", f"rendered '{action.target}' discovery shim",
+            backup_path=str(res.backup_path) if res.backup_path else None,
+        )
 
     def _resolve(self, cap: Capability) -> dict[str, str]:
         """Return the capability's secret field(s). Source-pluggable.
