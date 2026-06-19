@@ -75,6 +75,59 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if any(v.status in bad for v in verdicts) else 0
 
 
+def _shim_gap(surfaces: dict[str, set[str]]) -> set[str]:
+    """Shims missing from at least one *participating* harness.
+
+    A shim is a parity gap when some harness in `surfaces` exposes it and another
+    does not. With fewer than two participating harnesses there is nothing to
+    compare, so the gap set is empty. Pure — no I/O.
+    """
+    if len(surfaces) < 2:
+        return set()
+    union: set[str] = set().union(*surfaces.values())
+    return {shim for shim in union if any(shim not in s for s in surfaces.values())}
+
+
+def _shim_surfaces() -> dict[str, set[str]]:
+    """Each harness whose shim dir exists, mapped to the shims it advertises."""
+    return {
+        name: adapter.command_shims()
+        for name, adapter in adapters().items()
+        if adapter.shims_path.is_dir()
+    }
+
+
+def _cmd_shims(args: argparse.Namespace) -> int:
+    surfaces = _shim_surfaces()
+    gap = _shim_gap(surfaces)
+
+    if args.json:
+        print(json.dumps(
+            {
+                "surfaces": {h: sorted(s) for h, s in surfaces.items()},
+                "gap": sorted(gap),
+            },
+            indent=2,
+        ))
+    elif not surfaces:
+        print("no command-shim surface found for any harness")
+    else:
+        harnesses = sorted(surfaces)
+        all_shims = sorted(set().union(*surfaces.values())) if surfaces else []
+        width = max((len(s) for s in all_shims), default=4)
+        header = f"{'shim':<{width}}  " + "  ".join(f"{h:<8}" for h in harnesses)
+        print(header)
+        for shim in all_shims:
+            marks = "  ".join(f"{'*' if shim in surfaces[h] else '-':<8}" for h in harnesses)
+            line = f"{shim:<{width}}  {marks}"
+            if shim in gap:
+                line += "  <- parity gap"
+            print(line)
+
+    # Parity gate: non-zero when a participating harness lacks a shim another has.
+    return 1 if gap else 0
+
+
 def _plan_all(manifest_path: Path) -> list[Action]:
     """Collect reconcile actions across every capability x listed harness."""
     caps = parse_manifest(manifest_path)
@@ -183,6 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     doctor.set_defaults(func=_cmd_doctor)
+
+    shims = sub.add_parser(
+        "shims", help="read-only parity report of the command/skill shim surface"
+    )
+    shims.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    shims.set_defaults(func=_cmd_shims)
 
     rec = sub.add_parser(
         "reconcile", help="bring harnesses to the manifest (dry-run unless --apply)"

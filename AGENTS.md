@@ -92,6 +92,11 @@ Each adapter reads and renders one harness's wiring:
 Adapters must treat existing configs as **secret-bearing**: read for diffing,
 write only via the gated act path (backup-first, no secret clobber).
 
+Beyond the MCP capability layer, each adapter also reads its **command/skill shim
+surface** (`command_shims()`): opencode `command/<name>.md` stems and Claude
+`skills/<name>/SKILL.md` dirs. `acb shims` reports that surface's parity across
+harnesses (read-only, exits non-zero on a gap) — see `plans/003-shim-surface.md`.
+
 ## Boundary with sibling tools
 
 `acb` brokers and reconciles *capabilities*; it does not store secrets (Vault
