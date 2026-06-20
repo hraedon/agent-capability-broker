@@ -279,6 +279,21 @@ def _cred_shim_name(cap: Capability) -> str:
     return cap.id.replace(":", "-")
 
 
+def _vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
+    """The `.env` file the shim should point `ACB_VAULT_ENV` at.
+
+    Defaults to the adapter's `vault_env_path` (beside the harness config). A
+    capability may override with `options.vault_env` (a bare filename resolved
+    against the same dir) to use a different AppRole per access plane — e.g.
+    homelab AD creds via `vault.env`, cert-watch test creds via `cert-watch.env`.
+    """
+    base = adapter.vault_env_path
+    override = cap.options.get("vault_env")
+    if isinstance(override, str) and override:
+        return base.parent / override
+    return base
+
+
 def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path) -> str:
     """Markdown for a cred discovery shim. Carries **no secret** — only the
     capability id and the inject-don't-surface invocation pattern. Frontmatter
@@ -364,7 +379,7 @@ class CredProvider:
     ) -> list[Action]:
         shim = _cred_shim_name(cap)
         if shim not in adapter.command_shims():
-            content = _render_cred_shim(cap, harness, shim, adapter.vault_env_path)
+            content = _render_cred_shim(cap, harness, shim, _vault_env_path(cap, adapter))
             return [Action(
                 cap.id, harness, "add_cred_shim", shim,
                 f"add a '{shim}' discovery shim to {harness} (surfaces `acb exec {cap.id}`)",

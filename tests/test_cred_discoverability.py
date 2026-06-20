@@ -113,6 +113,22 @@ def test_plan_absent_renders_add_cred_shim(tmp_path: Path) -> None:
     assert "acb exec cred:svc-bot" in str(plan[0].payload["content"])
 
 
+def test_plan_renders_per_capability_vault_env(tmp_path: Path) -> None:
+    """A capability with options.vault_env points its shim at a distinct `.env`
+    file so different access planes use different least-privilege AppRoles."""
+    adapter = _opencode(tmp_path, shims=[])
+    cap = Capability(
+        "cred:ldap-bind", "cred", ("opencode",),
+        {"vault": "kv/cert-watch/ldap/bind", "fields": ["bind_dn", "password"],
+         "vault_env": "cert-watch.env"},
+    )
+    plan = CredProvider().plan_reconcile(cap, "opencode", adapter)
+    content = str(plan[0].payload["content"])
+    assert "cert-watch.env" in content
+    default_env = str(adapter.vault_env_path)
+    assert default_env not in content  # not the default vault.env path
+
+
 def test_plan_present_ok_is_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cred_vault, "reachable", lambda cap: True)
     adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
