@@ -4,7 +4,7 @@ Imported lazily by `providers.CredProvider` only when a capability uses
 `source = "vault"`. Requires the `[cred]` extra (hvac). Auth resolves inside the
 provider — the agent never thinks about how it authenticated:
 
-    in-cluster k8s service-account token  ->  AppRole (env)  ->  VAULT_TOKEN
+    in-cluster k8s service-account token  ->  AppRole (env / .env file)  ->  VAULT_TOKEN
 
 `resolve` returns the requested field(s); it never logs or returns anything to
 the model context (the caller injects into a child process).
@@ -20,18 +20,66 @@ from .model import Capability
 _K8S_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
 
+def _load_env_file() -> dict[str, str]:
+    """Load `VAULT_*` vars from the AppRole `.env` file, if present.
+
+    The charter calls for an "AppRole `.env`" auth path: the role_id/secret_id
+    live in a file (not the shell env) so they don't persist in process tables.
+    Path is `$ACB_VAULT_ENV` or `~/.config/acb/vault.env` by convention; each
+    harness points `ACB_VAULT_ENV` at its own file for role separation.
+
+    Handles bash-style `export KEY=val` prefixes and a UTF-8 BOM. A malformed or
+    unreadable file raises `RuntimeError` with the path (never the file's
+    contents) so `doctor`/`exec` can surface an actionable diagnostic.
+    """
+    path = os.environ.get("ACB_VAULT_ENV") or str(Path.home() / ".config" / "acb" / "vault.env")
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise RuntimeError(f"cannot read ACB_VAULT_ENV file {path!r}: {reason}") from exc
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"ACB_VAULT_ENV file {path!r} is not valid UTF-8 (byte offset {exc.start})"
+        ) from exc
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key.startswith("VAULT"):
+            out[key] = val
+    return out
+
+
+def _vault_env() -> dict[str, str]:
+    """Merged Vault config: the `.env` file is the fallback; process env wins."""
+    merged = _load_env_file()
+    merged.update({k: v for k, v in os.environ.items() if k.startswith("VAULT")})
+    return merged
+
+
 def _authenticate(client: object) -> None:
     """Log `client` in by the first available method. Raises if none work."""
+    env = _vault_env()
     # 1. In-cluster Kubernetes auth (no secret_id on disk).
     if _K8S_TOKEN.is_file():
-        role = os.environ.get("VAULT_K8S_ROLE")
+        role = env.get("VAULT_K8S_ROLE")
         if role:
             jwt = _K8S_TOKEN.read_text(encoding="utf-8").strip()
             client.auth.kubernetes.login(role=role, jwt=jwt)  # type: ignore[attr-defined]
             return
     # 2. AppRole (role_id + secret_id from env / the .env file).
-    role_id = os.environ.get("VAULT_ROLE_ID")
-    secret_id = os.environ.get("VAULT_SECRET_ID")
+    role_id = env.get("VAULT_ROLE_ID")
+    secret_id = env.get("VAULT_SECRET_ID")
     if role_id and secret_id:
         client.auth.approle.login(role_id=role_id, secret_id=secret_id)  # type: ignore[attr-defined]
         return
@@ -67,17 +115,26 @@ def reachable(cap: Capability) -> bool:
             "pip install 'agent-capability-broker[cred]'"
         ) from exc
 
-    addr = os.environ.get("VAULT_ADDR")
+    env = _vault_env()
+    addr = env.get("VAULT_ADDR")
     if not addr:
         raise RuntimeError("VAULT_ADDR is not set")
 
-    client = hvac.Client(url=addr, token=os.environ.get("VAULT_TOKEN"))
+    client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN"))
     _authenticate(client)
     return bool(client.is_authenticated())  # token self-lookup; no secret read
 
 
 def resolve(cap: Capability) -> dict[str, str]:
-    """Read the capability's secret field(s) from Vault (KV v2)."""
+    """Read the capability's secret field(s) from Vault (KV v2).
+
+    Field selection is **required** (fail-closed): `options.fields` (a list)
+    selects specific fields, or `options.field` (singular) reads one. When
+    neither is set the call raises — a Vault secret is not curated for injection
+    and defaulting to "all fields" risks over-exposing side-channel material
+    (rotation notes, audit IDs, tokens stored alongside the password). Explicit
+    selection is the safe default.
+    """
     try:
         import hvac
     except ImportError as exc:
@@ -86,26 +143,64 @@ def resolve(cap: Capability) -> dict[str, str]:
             "pip install 'agent-capability-broker[cred]'"
         ) from exc
 
-    addr = os.environ.get("VAULT_ADDR")
+    fields_opt = cap.options.get("fields")
+    if "fields" in cap.options and not isinstance(fields_opt, list):
+        raise RuntimeError(
+            f"capability {cap.id!r}: options.fields must be a list "
+            f"(got {type(fields_opt).__name__})"
+        )
+    field_opt = cap.options.get("field")
+    if field_opt is not None and not isinstance(field_opt, str):
+        raise RuntimeError(
+            f"capability {cap.id!r}: options.field must be a string "
+            f"(got {type(field_opt).__name__})"
+        )
+    if isinstance(fields_opt, list):
+        want = [str(f) for f in fields_opt]
+    elif field_opt is not None:
+        want = [field_opt]
+    else:
+        raise RuntimeError(
+            f"capability {cap.id!r}: field selection required — set options.field "
+            f"or options.fields (an explicit list of Vault secret keys to inject)"
+        )
+
+    env = _vault_env()
+    addr = env.get("VAULT_ADDR")
     if not addr:
         raise RuntimeError("VAULT_ADDR is not set")
     path = cap.options.get("vault")
     if not isinstance(path, str) or not path:
         raise RuntimeError(f"capability {cap.id!r} has no 'vault' path")
 
-    client = hvac.Client(url=addr, token=os.environ.get("VAULT_TOKEN"))
-    _authenticate(client)
-
-    mount, secret_path = _split_mount(path)
-    resp = client.secrets.kv.v2.read_secret_version(
-        mount_point=mount, path=secret_path, raise_on_deleted_version=True
-    )
+    try:
+        client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN"))
+        _authenticate(client)
+        mount, secret_path = _split_mount(path)
+        resp = client.secrets.kv.v2.read_secret_version(
+            mount_point=mount, path=secret_path, raise_on_deleted_version=True
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"vault read failed for {cap.id} ({type(exc).__name__})"
+        ) from exc
     data = resp["data"]["data"]
 
-    field = str(cap.options.get("field", "password"))
     out: dict[str, str] = {}
-    if field in data:
-        out[field] = str(data[field])
-    if not out:
-        raise RuntimeError(f"field {field!r} not found at {path}")
+    missing: list[str] = []
+    for f in want:
+        if f in data:
+            raw = data[f]
+            if not isinstance(raw, str):
+                raise RuntimeError(
+                    f"capability {cap.id!r}: field {f!r} at {path} is "
+                    f"{type(raw).__name__}, not str — only string fields can be injected"
+                )
+            out[f] = raw
+        else:
+            missing.append(f)
+    if missing:
+        raise RuntimeError(f"fields {missing!r} not found at {path}")
     return out

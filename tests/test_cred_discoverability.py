@@ -92,12 +92,14 @@ def test_inspect_env_source_reachability(tmp_path: Path, monkeypatch: pytest.Mon
 # --- render ----------------------------------------------------------------
 
 def test_render_shim_per_harness_carries_no_secret() -> None:
-    claude = _render_cred_shim(VAULT_CAP, "claude", "cred-svc-bot")
-    opencode = _render_cred_shim(VAULT_CAP, "opencode", "cred-svc-bot")
+    ve = Path("/tmp/vault.env")
+    claude = _render_cred_shim(VAULT_CAP, "claude", "cred-svc-bot", ve)
+    opencode = _render_cred_shim(VAULT_CAP, "opencode", "cred-svc-bot", ve)
     assert claude.startswith("---\nname: cred-svc-bot\n")  # Claude SKILL.md needs name:
     assert "name:" not in opencode.split("---\n\n")[0]      # opencode command does not
     for text in (claude, opencode):
         assert "acb exec cred:svc-bot" in text
+        assert "ACB_VAULT_ENV=" in text  # per-harness AppRole resolution
         # the vault *path* may appear, but never a secret value (there is none here)
         assert "password" not in text.lower()
 

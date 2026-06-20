@@ -29,6 +29,8 @@ class HarnessAdapter(Protocol):
 
     @property
     def shims_path(self) -> Path: ...
+    @property
+    def vault_env_path(self) -> Path: ...
     def available(self) -> bool: ...
     def mcp_servers(self) -> dict[str, McpServer]: ...
     def command_shims(self) -> set[str]: ...
@@ -277,10 +279,14 @@ def _cred_shim_name(cap: Capability) -> str:
     return cap.id.replace(":", "-")
 
 
-def _render_cred_shim(cap: Capability, harness: str, shim: str) -> str:
+def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path) -> str:
     """Markdown for a cred discovery shim. Carries **no secret** — only the
     capability id and the inject-don't-surface invocation pattern. Frontmatter
     matches each harness: Claude `SKILL.md` needs `name:`, opencode does not.
+
+    The command prefixes `ACB_VAULT_ENV` so acb authenticates via this harness's
+    AppRole `.env` (per-harness role separation: Claude and opencode hold
+    distinct AppRoles with distinct least-privilege policies).
     """
     desc = (
         f"Run a command with the {cap.id} credential injected by acb "
@@ -295,11 +301,12 @@ injected into the child process's environment and **never** printed or returned
 to your context:
 
 ```
-acb exec {cap.id} -- <command> [args...]
+ACB_VAULT_ENV={vault_env} acb exec {cap.id} -- <command> [args...]
 ```
 
-Do not read or echo the secret. `acb doctor` reports whether this capability is
-present and the broker reachable; `acb reconcile` (re)renders this shim.
+`ACB_VAULT_ENV` points acb at this harness's Vault AppRole (distinct per
+harness). Do not read or echo the secret. `acb doctor` reports whether this
+capability is present and the broker reachable; `acb reconcile` (re)renders this shim.
 """
     if harness == "claude":
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
@@ -357,7 +364,7 @@ class CredProvider:
     ) -> list[Action]:
         shim = _cred_shim_name(cap)
         if shim not in adapter.command_shims():
-            content = _render_cred_shim(cap, harness, shim)
+            content = _render_cred_shim(cap, harness, shim, adapter.vault_env_path)
             return [Action(
                 cap.id, harness, "add_cred_shim", shim,
                 f"add a '{shim}' discovery shim to {harness} (surfaces `acb exec {cap.id}`)",

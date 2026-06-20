@@ -139,6 +139,11 @@ class ClaudeAdapter:
         """Where Claude keeps skill shims: a `skills/` dir beside settings.json."""
         return self.settings_path.parent / "skills"
 
+    @property
+    def vault_env_path(self) -> Path:
+        """Where this harness's Vault AppRole `.env` lives: beside settings.json."""
+        return self.settings_path.parent / "vault.env"
+
     def available(self) -> bool:
         return self.settings_path.is_file()
 
@@ -184,6 +189,11 @@ class OpencodeAdapter:
     def shims_path(self) -> Path:
         """Where opencode keeps command shims: a `command/` dir beside the config."""
         return self.config_path.parent / "command"
+
+    @property
+    def vault_env_path(self) -> Path:
+        """Where this harness's Vault AppRole `.env` lives: beside the config."""
+        return self.config_path.parent / "vault.env"
 
     def available(self) -> bool:
         return self.config_path.is_file()

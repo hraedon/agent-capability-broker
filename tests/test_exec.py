@@ -89,6 +89,43 @@ def test_missing_env_source_errors(tmp_path: Path) -> None:
         CredProvider().exec(cap, [sys.executable, "-c", "pass"])
 
 
+def test_multi_field_exec_injects_each_and_stays_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Multi-field resolve (WI-006): the vault source returns username+password,
+    and exec injects BOTH into the child's env — without leaking either to
+    stdout/stderr/provenance. Proves the injection machinery handles a dict of
+    fields, not just the single-field env source."""
+    from agent_capability_broker import cred_vault
+
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    cap = Capability(
+        "cred:ad", "cred", ("opencode",),
+        {"vault": "kv/x/y", "fields": ["username", "password"]},
+    )
+    secrets = {"username": "svc-bot", "password": SECRET}
+    monkeypatch.setattr(cred_vault, "resolve", lambda c: secrets)
+
+    out = tmp_path / "seen.txt"
+    # Child records both vars it received.
+    code = (
+        f"import os, pathlib; "
+        f"pathlib.Path(r'{out}').write_text("
+        f"os.environ.get('USERNAME','?') + '|' + os.environ.get('PASSWORD','?'))"
+    )
+    rc = CredProvider().exec(cap, [sys.executable, "-c", code])
+
+    assert rc == 0
+    received = out.read_text()
+    assert received == f"svc-bot|{SECRET}"  # both fields injected
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out and SECRET not in captured.err  # broker silent
+
+    log = (tmp_path / "state" / "provenance.jsonl").read_text()
+    assert SECRET not in log and "svc-bot" not in log  # provenance carries no value
+    assert "PASSWORD" in log and "USERNAME" in log       # ...only the var names
+
+
 def test_cli_exec_passes_child_exit_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
