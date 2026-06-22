@@ -342,9 +342,15 @@ class CredProvider:
 
     name = "cred"
 
-    def _reachability(self, cap: Capability) -> tuple[Status, str]:
+    def _reachability(
+        self, cap: Capability, *, vault_env: Path | None = None
+    ) -> tuple[Status, str]:
         """Read-only broker reachability -> (status, detail). Never reads a secret;
-        any failure is mapped to UNKNOWN so `doctor` stays honest and robust."""
+        any failure is mapped to UNKNOWN so `doctor` stays honest and robust.
+
+        `vault_env` pins the probe to the capability's declared access plane (the
+        same `.env` the shim embeds) so multi-plane estates are checked per-plane,
+        not all through one shell `ACB_VAULT_ENV` (WI-008)."""
         source = str(cap.options.get("source", "vault"))
         if source == "env":
             var = cap.options.get("from_env")
@@ -356,7 +362,7 @@ class CredProvider:
         try:
             from . import cred_vault  # lazy: keeps the [cred] extra optional
 
-            ok = cred_vault.reachable(cap)
+            ok = cred_vault.reachable(cap, vault_env=vault_env)
         except Exception as exc:  # best-effort: never let a probe break doctor
             return Status.UNKNOWN, f"broker reachability not checked ({exc})"
         if ok:
@@ -371,7 +377,7 @@ class CredProvider:
                 f"no '{shim}' shim in {harness}: an agent there can't discover "
                 f"`acb exec {cap.id}`",
             )
-        status, detail = self._reachability(cap)
+        status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
         return Verdict(cap.id, harness, status, f"'{shim}' shim present; {detail}")
 
     def plan_reconcile(
@@ -387,7 +393,7 @@ class CredProvider:
             )]
         # Shim present: discoverability is satisfied. An unreachable broker is an
         # infra/auth problem, not something a config write can fix — surface it.
-        status, detail = self._reachability(cap)
+        status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
         if status is Status.PRESENT_BROKEN:
             return [Action(
                 cap.id, harness, "manual", shim,
