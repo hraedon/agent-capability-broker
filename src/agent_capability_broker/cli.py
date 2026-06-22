@@ -14,7 +14,15 @@ import sys
 from pathlib import Path
 
 from . import provenance
-from .model import KNOWN_HARNESSES, Action, ManifestError, Status, Verdict, parse_manifest
+from .model import (
+    KNOWN_HARNESSES,
+    Action,
+    ManifestError,
+    Status,
+    Verdict,
+    parse_manifest,
+    resolve_manifest,
+)
 from .providers import PROVIDERS, adapters
 
 
@@ -60,7 +68,7 @@ def _print_table(verdicts: list[Verdict]) -> None:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     try:
-        verdicts = _inspect_all(Path(args.manifest))
+        verdicts = _inspect_all(resolve_manifest(args.manifest))
     except ManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -147,7 +155,7 @@ def _plan_all(manifest_path: Path) -> list[Action]:
 
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     try:
-        plan = _plan_all(Path(args.manifest))
+        plan = _plan_all(resolve_manifest(args.manifest))
     except ManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -197,7 +205,7 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
 def _cmd_exec(args: argparse.Namespace) -> int:
     try:
-        caps = parse_manifest(Path(args.manifest))
+        caps = parse_manifest(resolve_manifest(args.manifest))
     except ManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -232,7 +240,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="read-only parity report across harnesses")
     doctor.add_argument(
-        "-m", "--manifest", default="capabilities.toml", help="path to capabilities.toml"
+        "-m", "--manifest", default=None,
+        help="manifest path (default: $ACB_MANIFEST, ~/.config/acb/capabilities.toml, then ./)",
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     doctor.set_defaults(func=_cmd_doctor)
@@ -247,7 +256,8 @@ def build_parser() -> argparse.ArgumentParser:
         "reconcile", help="bring harnesses to the manifest (dry-run unless --apply)"
     )
     rec.add_argument(
-        "-m", "--manifest", default="capabilities.toml", help="path to capabilities.toml"
+        "-m", "--manifest", default=None,
+        help="manifest path (default: $ACB_MANIFEST, ~/.config/acb/capabilities.toml, then ./)",
     )
     rec.add_argument(
         "--apply", action="store_true", help="perform the changes (default: dry-run)"
@@ -258,7 +268,8 @@ def build_parser() -> argparse.ArgumentParser:
         "exec", help="run a command with a capability injected (never surfaced)"
     )
     ex.add_argument(
-        "-m", "--manifest", default="capabilities.toml", help="path to capabilities.toml"
+        "-m", "--manifest", default=None,
+        help="manifest path (default: $ACB_MANIFEST, ~/.config/acb/capabilities.toml, then ./)",
     )
     ex.add_argument("capability", help="capability id, e.g. cred:svc-bot")
     ex.add_argument("argv", nargs=argparse.REMAINDER, help="-- command and args to run")
