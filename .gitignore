@@ -1,7 +1,9 @@
 # Real harness configs + manifests — never committed. They contain live bearer
 # tokens, Vault paths, and account names. Analysis runs on copies under samples/.
 samples/
-capabilities.toml          # a real estate manifest is a config, not an example
+# a real estate manifest is a config, not an example (inline comments are NOT
+# valid in .gitignore — they become part of the pattern and match nothing)
+capabilities.toml
 *.local.toml
 
 # Vault / credential material — must never land in the tree
