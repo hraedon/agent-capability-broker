@@ -51,7 +51,7 @@ def test_inspect_absent_when_no_shim(tmp_path: Path) -> None:
 def test_inspect_present_ok_when_shim_and_broker_reachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cred_vault, "reachable", lambda cap: True)
+    monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: True)
     adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
     v = CredProvider().inspect(VAULT_CAP, "opencode", adapter)
     assert v.status is Status.PRESENT_OK
@@ -61,7 +61,7 @@ def test_inspect_present_ok_when_shim_and_broker_reachable(
 def test_inspect_present_broken_when_shim_but_broker_unreachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cred_vault, "reachable", lambda cap: False)
+    monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: False)
     adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
     v = CredProvider().inspect(VAULT_CAP, "opencode", adapter)
     assert v.status is Status.PRESENT_BROKEN
@@ -70,7 +70,7 @@ def test_inspect_present_broken_when_shim_but_broker_unreachable(
 def test_inspect_unknown_when_reachability_uncheckable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _boom(cap: Capability) -> bool:
+    def _boom(cap: Capability, **_: object) -> bool:
         raise RuntimeError("no [cred] extra")
 
     monkeypatch.setattr(cred_vault, "reachable", _boom)
@@ -87,6 +87,58 @@ def test_inspect_env_source_reachability(tmp_path: Path, monkeypatch: pytest.Mon
     assert CredProvider().inspect(cap, "opencode", adapter).status is Status.PRESENT_BROKEN
     monkeypatch.setenv("ACB_T", "x")
     assert CredProvider().inspect(cap, "opencode", adapter).status is Status.PRESENT_OK
+
+
+# --- WI-008: doctor probes each capability's *declared* access plane --------
+
+def test_inspect_probes_per_capability_vault_env_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`doctor` must check reachability through the same `.env` the shim embeds
+    (the capability's declared plane), not one shell `ACB_VAULT_ENV` for all of
+    them — otherwise a broken plane reports PRESENT_OK off another plane's token."""
+    seen: dict[str, object] = {}
+
+    def _capture(cap: Capability, *, vault_env: object = None) -> bool:
+        seen["vault_env"] = vault_env
+        return True
+
+    monkeypatch.setattr(cred_vault, "reachable", _capture)
+    adapter = _opencode(tmp_path, shims=["cred-ldap-bind"])
+    cap = Capability(
+        "cred:ldap-bind", "cred", ("opencode",),
+        {"vault": "kv/cert-watch/ldap/bind", "field": "password",
+         "vault_env": "cert-watch.env"},
+    )
+    v = CredProvider().inspect(cap, "opencode", adapter)
+    assert v.status is Status.PRESENT_OK
+    assert Path(str(seen["vault_env"])).name == "cert-watch.env"  # the declared plane
+
+
+def test_inspect_probes_default_plane_without_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        cred_vault, "reachable",
+        lambda cap, *, vault_env=None: seen.setdefault("vault_env", vault_env) or True,
+    )
+    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    CredProvider().inspect(VAULT_CAP, "opencode", adapter)
+    assert seen["vault_env"] == adapter.vault_env_path  # adapter default, no override
+
+
+def test_load_env_file_explicit_path_overrides_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-plane probe reads the file it is handed, not $ACB_VAULT_ENV."""
+    shell_env = tmp_path / "homelab.env"
+    shell_env.write_text("VAULT_ADDR=https://homelab\n", encoding="utf-8")
+    plane_env = tmp_path / "cert-watch.env"
+    plane_env.write_text("VAULT_ADDR=https://cert-watch\n", encoding="utf-8")
+    monkeypatch.setenv("ACB_VAULT_ENV", str(shell_env))
+    assert cred_vault._load_env_file(plane_env)["VAULT_ADDR"] == "https://cert-watch"
+    assert cred_vault._load_env_file()["VAULT_ADDR"] == "https://homelab"  # falls back
 
 
 # --- render ----------------------------------------------------------------
@@ -130,13 +182,13 @@ def test_plan_renders_per_capability_vault_env(tmp_path: Path) -> None:
 
 
 def test_plan_present_ok_is_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cred_vault, "reachable", lambda cap: True)
+    monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: True)
     adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
     assert CredProvider().plan_reconcile(VAULT_CAP, "opencode", adapter) == []
 
 
 def test_plan_broken_broker_is_manual(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cred_vault, "reachable", lambda cap: False)
+    monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: False)
     adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
     plan = CredProvider().plan_reconcile(VAULT_CAP, "opencode", adapter)
     assert plan[0].kind == "manual" and "unreachable" in plan[0].summary
