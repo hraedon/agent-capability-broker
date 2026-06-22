@@ -6,6 +6,7 @@ here performs I/O against a live system, mutates a config, or touches a secret.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -30,6 +31,48 @@ class Status(StrEnum):
 
 class ManifestError(ValueError):
     """A capabilities.toml that violates the core contract."""
+
+
+def default_manifest_locations() -> list[Path]:
+    """Ordered, CWD-independent manifest search path (see `resolve_manifest`).
+
+    Mirrors the resource-resolution convention the rest of acb already uses
+    (`cred_vault` → `~/.config/acb/vault.env`, `provenance` → `XDG_STATE_HOME`):
+    an `$ACB_*` override, then an XDG/`~/.config/acb` location, then CWD for
+    in-repo dev. The manifest is the resource that was missing it — which is why
+    `acb` only worked from its own repo directory.
+    """
+    locs: list[Path] = []
+    env = os.environ.get("ACB_MANIFEST")
+    if env:
+        locs.append(Path(env))
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    locs.append(base / "acb" / "capabilities.toml")
+    locs.append(Path("capabilities.toml"))  # CWD, for working inside the acb repo
+    return locs
+
+
+def resolve_manifest(explicit: str | os.PathLike[str] | None = None) -> Path:
+    """Find the manifest independent of the caller's working directory.
+
+    An `explicit` path (e.g. a `--manifest` flag) always wins. Otherwise the
+    `default_manifest_locations` are tried in order and the first that exists is
+    returned. If none exist, raise `ManifestError` naming *every* location
+    checked — so an agent in another harness is told where to put the file
+    instead of guessing (`~/.acb`, `~/.config/acb`, …) and giving up.
+    """
+    if explicit is not None:
+        return Path(explicit)
+    searched = default_manifest_locations()
+    for loc in searched:
+        if loc.is_file():
+            return loc
+    locations = ", ".join(str(p) for p in searched)
+    raise ManifestError(
+        f"no capabilities.toml found (looked in: {locations}). "
+        f"Set $ACB_MANIFEST or create ~/.config/acb/capabilities.toml"
+    )
 
 
 @dataclass(frozen=True)
