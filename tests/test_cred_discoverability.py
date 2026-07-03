@@ -156,6 +156,17 @@ def test_render_shim_per_harness_carries_no_secret() -> None:
         assert "password" not in text.lower()
 
 
+def test_render_shim_includes_cross_platform_invocation() -> None:
+    """The shim renders invocation patterns for Unix and Windows (Plan 005 WI-3.1)."""
+    ve = Path("/tmp/vault.env")
+    for harness in ("claude", "opencode"):
+        text = _render_cred_shim(VAULT_CAP, harness, "cred-svc-bot", ve)
+        assert "ACB_VAULT_ENV=" in text          # Unix / macOS
+        assert "$env:ACB_VAULT_ENV=" in text      # Windows PowerShell
+        assert 'set "ACB_VAULT_ENV=' in text       # Windows cmd (quoted for safety)
+        assert "install-harness" in text           # bootstrap mention
+
+
 # --- reconcile: render the missing shim ------------------------------------
 
 def test_plan_absent_renders_add_cred_shim(tmp_path: Path) -> None:

@@ -43,17 +43,22 @@ and reconciles reality to it.
 **In:**
 - A declarative **capability manifest** (`capabilities.toml`): the desired set,
   per estate/host, with which harnesses should expose each. It is resolved
-  independently of the working directory — `$ACB_MANIFEST`, then
-  `~/.config/acb/capabilities.toml` (the canonical install location), then
-  `./capabilities.toml` for in-repo dev — so `acb` works the same from any
-  harness's shell, not only from its own checkout.
+  independently of the working directory — `$ACB_MANIFEST`, then the suite
+  config dir (`$AGENT_SUITE_CONFIG` → `~/.config/agent-suite/`), then
+  `~/.config/acb/capabilities.toml`, then `./capabilities.toml` for in-repo
+  dev — so `acb` works the same from any harness's shell, not only from its own
+  checkout. In a suite deployment the manifest is the estate's **capability
+  contract**: one file, provisioned into every harness by
+  `acb install-harness`.
 - A **provider** interface; `cred` (Vault-brokered AD/service-account creds) and
   `e2e` (Playwright/browser provisioning, local or remote backend) are the first
   two. Adding a provider is the extension point.
 - **Harness adapters** that read and render each harness's wiring (Claude Code
   `settings.json` + skills; opencode `opencode.json` MCP/commands).
 - `doctor` (read-only parity report), `reconcile` (generate wiring, dry-run by
-  default), `exec` (inject-and-run, never surfacing the secret).
+  default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
+  (bootstrap: provision one harness from the manifest + verify), `shims`
+  (read-only shim parity report).
 - **Provenance emission** of every acting verb to regista / agent-provenance.
 
 **Out / non-goals:**

@@ -15,40 +15,41 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .model import Capability
+from .model import Capability, suite_config_dir
 
 _K8S_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
 
-def _load_env_file(env_path: str | os.PathLike[str] | None = None) -> dict[str, str]:
-    """Load `VAULT_*` vars from the AppRole `.env` file, if present.
+def _default_vault_env_paths() -> list[Path]:
+    """Ordered fallback paths for the Vault AppRole ``.env`` file (Plan 005).
 
-    The charter calls for an "AppRole `.env`" auth path: the role_id/secret_id
-    live in a file (not the shell env) so they don't persist in process tables.
-    Path precedence: an explicit `env_path` (e.g. `doctor` probing a capability's
-    *declared* access plane, independent of the shell), else `$ACB_VAULT_ENV`,
-    else `~/.config/acb/vault.env`. Each harness points `ACB_VAULT_ENV` at its own
-    file for role separation.
-
-    Handles bash-style `export KEY=val` prefixes and a UTF-8 BOM. A malformed or
-    unreadable file raises `RuntimeError` with the path (never the file's
-    contents) so `doctor`/`exec` can surface an actionable diagnostic.
+    Precedence mirrors the manifest resolution: ``$ACB_VAULT_ENV`` (explicit
+    shell override) → suite config dir / ``vault.env`` → suite config dir /
+    ``suite.env`` (may also carry ``VAULT_*`` vars) → acb-private
+    ``~/.config/acb/vault.env``.  Only files that *exist* are loaded by the
+    caller; this list may include non-existent paths.  ``_parse_env_text``
+    filters to ``VAULT*`` keys so loading ``suite.env`` is safe — ``REGISTA_*``
+    and other suite vars are ignored.
     """
-    path = str(env_path) if env_path else (
-        os.environ.get("ACB_VAULT_ENV") or str(Path.home() / ".config" / "acb" / "vault.env")
-    )
-    p = Path(path)
-    try:
-        text = p.read_text(encoding="utf-8-sig")
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        reason = exc.strerror or str(exc)
-        raise RuntimeError(f"cannot read ACB_VAULT_ENV file {path!r}: {reason}") from exc
-    except UnicodeDecodeError as exc:
-        raise RuntimeError(
-            f"ACB_VAULT_ENV file {path!r} is not valid UTF-8 (byte offset {exc.start})"
-        ) from exc
+    paths: list[Path] = []
+    env = os.environ.get("ACB_VAULT_ENV")
+    if env:
+        paths.append(Path(env))
+    suite = suite_config_dir()
+    if suite is not None:
+        paths.append(suite / "vault.env")
+        paths.append(suite / "suite.env")
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    paths.append(base / "acb" / "vault.env")
+    return paths
+
+
+def _parse_env_text(text: str) -> dict[str, str]:
+    """Parse ``KEY=val`` lines, returning only ``VAULT*`` keys.
+
+    Handles bash-style ``export KEY=val`` prefixes.  Strips surrounding quotes.
+    """
     out: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
@@ -64,14 +65,54 @@ def _load_env_file(env_path: str | os.PathLike[str] | None = None) -> dict[str, 
     return out
 
 
+def _load_env_file(env_path: str | os.PathLike[str] | None = None) -> dict[str, str]:
+    """Load ``VAULT_*`` vars from the AppRole ``.env`` file, if present.
+
+    The charter calls for an "AppRole ``.env``" auth path: the role_id/secret_id
+    live in a file (not the shell env) so they don't persist in process tables.
+    Path precedence (Plan 005 WI-1.1/WI-3.1): an explicit ``env_path`` (e.g.
+    ``doctor`` probing a capability's *declared* access plane, independent of
+    the shell), else ``$ACB_VAULT_ENV``, else the suite config dir's
+    ``vault.env``, else ``~/.config/acb/vault.env``.  Each harness points
+    ``ACB_VAULT_ENV`` at its own file for role separation.
+
+    Handles bash-style ``export KEY=val`` prefixes and a UTF-8 BOM.  A malformed
+    or unreadable file raises ``RuntimeError`` with the path (never the file's
+    contents) so ``doctor``/``exec`` can surface an actionable diagnostic.
+    """
+    if env_path:
+        candidate_paths = [Path(env_path)]
+    else:
+        candidate_paths = _default_vault_env_paths()
+
+    for p in candidate_paths:
+        try:
+            text = p.read_text(encoding="utf-8-sig")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            raise RuntimeError(f"cannot read Vault env file {p!r}: {reason}") from exc
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(
+                f"Vault env file {p!r} is not valid UTF-8 (byte offset {exc.start})"
+            ) from exc
+        return _parse_env_text(text)
+    return {}
+
+
 def _vault_env(env_path: str | os.PathLike[str] | None = None) -> dict[str, str]:
     """Merged Vault config: the `.env` file is the fallback; process env wins.
 
-    `env_path` selects a specific `.env` (a capability's declared access plane);
-    without it the `$ACB_VAULT_ENV`/default convention applies.
+    When ``env_path`` is **explicit** (per-plane probing, WI-008), the file is
+    authoritative — process env is **not** merged on top, so a stray
+    ``VAULT_ADDR`` in the shell can't make every plane probe through one
+    credential set.  Without ``env_path`` (the ``resolve``/``exec`` path), the
+    normal merge applies so a ``VAULT_TOKEN`` from a prior login still works.
     """
     merged = _load_env_file(env_path)
-    merged.update({k: v for k, v in os.environ.items() if k.startswith("VAULT")})
+    if env_path is None:
+        merged.update({k: v for k, v in os.environ.items() if k.startswith("VAULT")})
     return merged
 
 

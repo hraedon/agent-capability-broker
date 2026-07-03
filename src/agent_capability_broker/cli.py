@@ -1,9 +1,10 @@
 """`acb` command-line entry point.
 
-Charter-stage: `doctor` parses a manifest and prints the parity matrix. Real
-per-provider inspection and the act-path verbs (reconcile/exec) land in the
-plans; until a provider reports, statuses are UNKNOWN. The read path here never
-mutates a config and never surfaces a secret.
+The read path (`doctor`, `shims`) is deterministic and never mutates a config
+or surfaces a secret. The act path (`reconcile`, `exec`, `install-harness`)
+mutates configs and injects secrets: it is dry-run by default, backs up before
+writing, is idempotent, never clobbers an existing secret, and emits
+provenance on every act.
 """
 
 from __future__ import annotations
@@ -74,7 +75,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         return 2
 
     if args.json:
-        print(json.dumps([v.__dict__ | {"status": v.status.value} for v in verdicts], indent=2))
+        from . import __version__
+
+        payload = {
+            "component": "acb",
+            "version": __version__,
+            "checks": [
+                {
+                    "capability": v.capability,
+                    "harness": v.harness,
+                    "status": v.status.value,
+                    "detail": v.detail,
+                }
+                for v in verdicts
+            ],
+            # acb has no direct regista runtime dependency (by design); report
+            # the honestly-absent state rather than faking a reachable verdict.
+            "regista": {"reachable": None},
+        }
+        print(json.dumps(payload, indent=2))
     else:
         _print_table(verdicts)
 
@@ -151,6 +170,47 @@ def _plan_all(manifest_path: Path) -> list[Action]:
                 continue
             plan.extend(provider.plan_reconcile(cap, harness, adapter))
     return plan
+
+
+def _plan_for_harness(manifest_path: Path, harness: str) -> list[Action]:
+    """Collect reconcile actions for one harness only (install-harness)."""
+    caps = parse_manifest(manifest_path)
+    harness_adapters = adapters()
+    plan: list[Action] = []
+    adapter = harness_adapters.get(harness)
+    for cap in caps:
+        if harness not in cap.harnesses:
+            continue
+        provider = PROVIDERS.get(cap.provider)
+        if provider is None:
+            continue
+        if adapter is None or not adapter.available():
+            continue
+        plan.extend(provider.plan_reconcile(cap, harness, adapter))
+    return plan
+
+
+def _inspect_for_harness(manifest_path: Path, harness: str) -> list[Verdict]:
+    """Post-install verification: inspect each capability × the named harness."""
+    caps = parse_manifest(manifest_path)
+    harness_adapters = adapters()
+    adapter = harness_adapters.get(harness)
+    verdicts: list[Verdict] = []
+    for cap in caps:
+        if harness not in cap.harnesses:
+            continue
+        provider = PROVIDERS.get(cap.provider)
+        if provider is None:
+            verdicts.append(
+                Verdict(cap.id, harness, Status.UNKNOWN, f"no provider {cap.provider!r}")
+            )
+        elif adapter is None or not adapter.available():
+            verdicts.append(
+                Verdict(cap.id, harness, Status.UNKNOWN, f"no {harness} config found")
+            )
+        else:
+            verdicts.append(provider.inspect(cap, harness, adapter))
+    return verdicts
 
 
 def _cmd_reconcile(args: argparse.Namespace) -> int:
@@ -233,6 +293,81 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         return 2
 
 
+def _cmd_install_harness(args: argparse.Namespace) -> int:
+    """Install acb's shims into one harness and verify each capability.
+
+    Bootstrap step 5 (Plan 005): one idempotent command that renders the
+    discovery shims and MCP wiring a harness needs from the manifest, then
+    runs a focused doctor to report per-capability status.  Re-runnable: a
+    fully-provisioned harness yields a no-op plan and all-PRESENT_OK verdicts.
+    """
+    if args.harness not in KNOWN_HARNESSES:
+        print(
+            f"error: unknown harness {args.harness!r} "
+            f"(known: {sorted(KNOWN_HARNESSES)})",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        manifest_path = resolve_manifest(args.manifest)
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    plan = _plan_for_harness(manifest_path, args.harness)
+
+    if args.dry_run:
+        if not plan:
+            print(f"{args.harness}: nothing to install — all capabilities present")
+            return 0
+        for action in plan:
+            verb = "would apply" if action.kind != "manual" else "manual"
+            print(f"[{verb}] {action.capability} / {action.harness}: {action.summary}")
+        auto = [a for a in plan if a.kind != "manual"]
+        if auto:
+            print(f"\n{len(auto)} action(s) planned. Re-run without --dry-run to perform them.")
+        return 1 if plan else 0
+
+    # Apply phase: render shims / wire MCP for this harness.
+    harness_adapters = adapters()
+    adapter = harness_adapters.get(args.harness)
+    applied = 0
+    skipped = 0
+    for action in plan:
+        if adapter is None or not adapter.available():
+            print(f"[SKIP] {action.capability}: adapter unavailable")
+            skipped += 1
+            continue
+        provider_name = action.capability.split(":", 1)[0]
+        provider = PROVIDERS.get(provider_name)
+        if provider is None:
+            print(f"[SKIP] {action.capability}: no provider {provider_name!r}")
+            skipped += 1
+            continue
+        result = provider.apply(action, adapter)
+        provenance.emit(result)
+        tag = result.status.upper()
+        line = f"[{tag}] {action.capability}: {result.detail or action.summary}"
+        if result.backup_path:
+            line += f"  (backup: {result.backup_path})"
+        print(line)
+        if result.status == "applied":
+            applied += 1
+        else:
+            skipped += 1
+
+    # Verify phase: re-inspect each capability for this harness.
+    verdicts = _inspect_for_harness(manifest_path, args.harness)
+    print(f"\n— {args.harness} capability status —")
+    _print_table(verdicts)
+
+    bad = {Status.PRESENT_BROKEN, Status.ABSENT}
+    if any(v.status in bad for v in verdicts):
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -241,9 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="read-only parity report across harnesses")
     doctor.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, ~/.config/acb/capabilities.toml, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
     )
-    doctor.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    doctor.add_argument("--json", action="store_true", help="emit JSON (suite health shape)")
     doctor.set_defaults(func=_cmd_doctor)
 
     shims = sub.add_parser(
@@ -257,7 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rec.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, ~/.config/acb/capabilities.toml, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
     )
     rec.add_argument(
         "--apply", action="store_true", help="perform the changes (default: dry-run)"
@@ -269,11 +404,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ex.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, ~/.config/acb/capabilities.toml, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
     )
     ex.add_argument("capability", help="capability id, e.g. cred:svc-bot")
     ex.add_argument("argv", nargs=argparse.REMAINDER, help="-- command and args to run")
     ex.set_defaults(func=_cmd_exec)
+
+    ih = sub.add_parser(
+        "install-harness",
+        help="install shims into one harness and verify capabilities (bootstrap)",
+    )
+    ih.add_argument(
+        "harness", help="harness to provision (e.g. claude, opencode)"
+    )
+    ih.add_argument(
+        "-m", "--manifest", default=None,
+        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
+    )
+    ih.add_argument(
+        "--dry-run", action="store_true",
+        help="show what would be installed without applying"
+    )
+    ih.set_defaults(func=_cmd_install_harness)
 
     return parser
 

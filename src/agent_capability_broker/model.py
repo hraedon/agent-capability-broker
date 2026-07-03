@@ -33,19 +33,41 @@ class ManifestError(ValueError):
     """A capabilities.toml that violates the core contract."""
 
 
+def suite_config_dir() -> Path | None:
+    """The suite's shared config directory (blueprint §2.1).
+
+    ``$AGENT_SUITE_CONFIG`` may point at a file (e.g. ``suite.env``) or a
+    directory.  If a file, its parent is the config dir.  When unset, the
+    default is ``~/.config/agent-suite/``.  Returns ``None`` when the env
+    var is unset *and* the default does not exist (so callers don't waste I/O
+    probing a non-existent suite location ahead of the acb-private fallback).
+    """
+    env = os.environ.get("AGENT_SUITE_CONFIG")
+    if env:
+        p = Path(env)
+        return p.parent if p.is_file() else p
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    default = base / "agent-suite"
+    return default if default.is_dir() else None
+
+
 def default_manifest_locations() -> list[Path]:
     """Ordered, CWD-independent manifest search path (see `resolve_manifest`).
 
-    Mirrors the resource-resolution convention the rest of acb already uses
-    (`cred_vault` → `~/.config/acb/vault.env`, `provenance` → `XDG_STATE_HOME`):
-    an `$ACB_*` override, then an XDG/`~/.config/acb` location, then CWD for
-    in-repo dev. The manifest is the resource that was missing it — which is why
-    `acb` only worked from its own repo directory.
+    Precedence (Plan 005 WI-1.1): an ``$ACB_MANIFEST`` override, then the
+    suite config dir (``$AGENT_SUITE_CONFIG`` → ``~/.config/agent-suite/``)
+    when present, then the acb-private XDG location, then CWD for in-repo dev.
+    The suite dir sits ahead of the acb-private default so a suite deployment
+    can declare one manifest for the whole estate.
     """
     locs: list[Path] = []
     env = os.environ.get("ACB_MANIFEST")
     if env:
         locs.append(Path(env))
+    suite = suite_config_dir()
+    if suite is not None:
+        locs.append(suite / "capabilities.toml")
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg) if xdg else Path.home() / ".config"
     locs.append(base / "acb" / "capabilities.toml")

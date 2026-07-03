@@ -301,27 +301,46 @@ def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path)
 
     The command prefixes `ACB_VAULT_ENV` so acb authenticates via this harness's
     AppRole `.env` (per-harness role separation: Claude and opencode hold
-    distinct AppRoles with distinct least-privilege policies).
+    distinct AppRoles with distinct least-privilege policies).  Invocation
+    patterns are rendered for both Unix and Windows so a cross-platform estate
+    can follow the same shim from either OS (Plan 005 WI-3.1).
     """
     desc = (
         f"Run a command with the {cap.id} credential injected by acb "
         f"(inject-don't-surface — the secret reaches the child's environment, never "
         f"stdout or your context). Use when a tool needs {cap.id}."
     )
+    ve = str(vault_env)
     body = f"""# {shim} — broker {cap.id}
 
 `{cap.id}` is brokered by **agent-capability-broker**; it is not stored in this
 harness. To run a tool with it, shell out to `acb exec` — the credential is
 injected into the child process's environment and **never** printed or returned
-to your context:
+to your context.
+
+**Linux / macOS:**
 
 ```
-ACB_VAULT_ENV={vault_env} acb exec {cap.id} -- <command> [args...]
+ACB_VAULT_ENV={ve} acb exec {cap.id} -- <command> [args...]
+```
+
+**Windows (PowerShell):**
+
+```
+$env:ACB_VAULT_ENV="{ve}"; acb exec {cap.id} -- <command> [args...]
+```
+
+**Windows (cmd):**
+
+```
+set "ACB_VAULT_ENV={ve}"&& acb exec {cap.id} -- <command> [args...]
 ```
 
 `ACB_VAULT_ENV` points acb at this harness's Vault AppRole (distinct per
 harness). Do not read or echo the secret. `acb doctor` reports whether this
 capability is present and the broker reachable; `acb reconcile` (re)renders this shim.
+`acb install-harness {harness}` is the bootstrap step that renders all shims for
+this harness at once.
 """
     if harness == "claude":
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'

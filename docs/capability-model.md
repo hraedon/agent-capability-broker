@@ -33,6 +33,15 @@ encoded in committed examples (`cred:svc-bot`, not a real account name).
 The single declarative source of the **desired** capability set for a host or
 estate. Stdlib `tomllib` parses it; there is no other source of truth.
 
+In a suite deployment (Plan 005), the manifest is the **suite's capability
+contract**: one file declares every capability the estate's agents should have,
+and `acb install-harness <name>` provisions each harness from it. The manifest
+is resolved from the suite config dir (`$AGENT_SUITE_CONFIG` →
+`~/.config/agent-suite/`) when present, ahead of the acb-private default
+(`~/.config/acb/`). See `docs/capabilities.example.toml` for a committed
+placeholder; a real estate manifest (pointing at real Vault paths) is
+gitignored — it is a config, not an example.
+
 ```toml
 # Example — placeholders only; never commit a real one.
 [capability."cred:svc-bot"]

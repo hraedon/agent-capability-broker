@@ -221,3 +221,35 @@ def test_env_file_non_utf8_raises_with_path(
     monkeypatch.setenv("ACB_VAULT_ENV", str(env_file))
     with pytest.raises(RuntimeError, match="not valid UTF-8"):
         cred_vault._load_env_file()
+
+
+# --- per-plane probing: file is authoritative when env_path is explicit --------
+# MEDIUM-1 fix (adversarial review): when _vault_env is called with an explicit
+# env_path (per-plane probing, WI-008), the file must be authoritative — process
+# env must NOT override it, or all planes probe through one shell credential set.
+
+
+def test_vault_env_explicit_path_not_overridden_by_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When env_path is explicit, the file is authoritative — process env wins
+    only for keys NOT in the file."""
+    plane_env = tmp_path / "cert-watch.env"
+    plane_env.write_text("VAULT_ADDR=https://per-plane\n", encoding="utf-8")
+    monkeypatch.setenv("VAULT_ADDR", "https://from-shell")
+
+    env = cred_vault._vault_env(plane_env)
+    assert env["VAULT_ADDR"] == "https://per-plane"  # file wins, not shell
+
+
+def test_vault_env_no_env_path_still_merges_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without env_path (the resolve/exec path), process env still overrides."""
+    env_file = tmp_path / "vault.env"
+    env_file.write_text("VAULT_ADDR=https://from-file\n", encoding="utf-8")
+    monkeypatch.setenv("ACB_VAULT_ENV", str(env_file))
+    monkeypatch.setenv("VAULT_ADDR", "https://from-process")
+
+    env = cred_vault._vault_env()
+    assert env["VAULT_ADDR"] == "https://from-process"  # process wins

@@ -1,6 +1,11 @@
 # Example capability manifest — PLACEHOLDERS ONLY.
 # A real estate manifest (pointing at real Vault paths) is a config, not an
 # example: it is gitignored. Never commit one with real account names or paths.
+#
+# In a suite deployment, place this at $AGENT_SUITE_CONFIG/capabilities.toml
+# (default ~/.config/agent-suite/capabilities.toml) so every tool in the suite
+# shares one capability contract. Run `acb install-harness <name>` to provision
+# each harness from it.
 
 [capability."cred:svc-bot"]
 provider  = "cred"
