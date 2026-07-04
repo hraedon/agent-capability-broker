@@ -140,3 +140,25 @@ def test_cli_exec_passes_child_exit_code(
     child = [sys.executable, "-c", "raise SystemExit(7)"]
     rc = main(["exec", "-m", str(manifest), "cred:test", "--", *child])
     assert rc == 7
+
+
+def test_cli_exec_manifest_after_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The -m flag works even when placed after the capability id.
+
+    argparse.REMAINDER captures -m as part of the command argv instead of
+    parsing it as the --manifest option. Fixed by manually extracting -m/
+    --manifest from the captured argv before processing the command.
+    """
+    monkeypatch.setenv("SRC", SECRET)
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        'from_env="SRC"\nharnesses=["opencode"]\n',
+        encoding="utf-8",
+    )
+    child = [sys.executable, "-c", "raise SystemExit(0)"]
+    rc = main(["exec", "cred:test", "-m", str(manifest), "--", *child])
+    assert rc == 0

@@ -18,6 +18,7 @@ from . import provenance
 from .model import (
     KNOWN_HARNESSES,
     Action,
+    ActionResult,
     ManifestError,
     Status,
     Verdict,
@@ -247,7 +248,10 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
             print(f"[SKIP] {action.capability} / {action.harness}: no provider {provider_name!r}")
             unapplied += 1
             continue
-        result = provider.apply(action, adapter)
+        try:
+            result = provider.apply(action, adapter)
+        except (OSError, KeyError) as exc:
+            result = ActionResult(action, "failed", f"apply error: {exc}")
         provenance.emit(result)
         tag = result.status.upper()
         line = f"[{tag}] {action.capability} / {action.harness}: {result.detail or action.summary}"
@@ -264,8 +268,35 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
 
 def _cmd_exec(args: argparse.Namespace) -> int:
+    argv = list(args.argv)
+    manifest = args.manifest
+
+    # argparse.REMAINDER captures everything after the capability positional,
+    # including -m/--manifest flags that should have been parsed as options.
+    # Extract them so `acb exec <cap> -m manifest.toml -- cmd` works (not just
+    # `acb exec -m manifest.toml <cap> -- cmd`).
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-m", "--manifest") and i + 1 < len(argv):
+            manifest = argv[i + 1]
+            del argv[i:i + 2]
+            continue
+        if tok.startswith("--manifest="):
+            manifest = tok.split("=", 1)[1]
+            del argv[i]
+            continue
+        if tok == "--":
+            del argv[i]
+            break
+        i += 1
+
+    if not argv:
+        print("error: no command (usage: acb exec <cap> -- <cmd…>)", file=sys.stderr)
+        return 2
+
     try:
-        caps = parse_manifest(resolve_manifest(args.manifest))
+        caps = parse_manifest(resolve_manifest(manifest))
     except ManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -277,13 +308,6 @@ def _cmd_exec(args: argparse.Namespace) -> int:
     provider = PROVIDERS.get(cap.provider)
     if provider is None:
         print(f"error: no provider {cap.provider!r}", file=sys.stderr)
-        return 2
-
-    argv = list(args.argv)
-    if argv and argv[0] == "--":
-        argv = argv[1:]
-    if not argv:
-        print("error: no command (usage: acb exec <cap> -- <cmd…>)", file=sys.stderr)
         return 2
 
     try:
@@ -345,7 +369,10 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
             print(f"[SKIP] {action.capability}: no provider {provider_name!r}")
             skipped += 1
             continue
-        result = provider.apply(action, adapter)
+        try:
+            result = provider.apply(action, adapter)
+        except (OSError, KeyError) as exc:
+            result = ActionResult(action, "failed", f"apply error: {exc}")
         provenance.emit(result)
         tag = result.status.upper()
         line = f"[{tag}] {action.capability}: {result.detail or action.summary}"

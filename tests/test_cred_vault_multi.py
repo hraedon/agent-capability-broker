@@ -188,6 +188,60 @@ def test_env_file_handles_export_prefix(tmp_path: Path, monkeypatch: pytest.Monk
     assert env["VAULT_SECRET_ID"] == "secret-888"
 
 
+def test_env_file_strips_inline_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOW-3: inline comments after values must be stripped."""
+    env_file = tmp_path / "vault.env"
+    env_file.write_text(
+        "VAULT_ADDR=https://vault.example # production vault\n"
+        "VAULT_TOKEN=tok-123 # rotated weekly\n"
+        "VAULT_ROLE_ID=role-456\t# tab-separated comment\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ACB_VAULT_ENV", str(env_file))
+    for k in ("VAULT_ADDR", "VAULT_TOKEN", "VAULT_ROLE_ID"):
+        monkeypatch.delenv(k, raising=False)
+    env = cred_vault._vault_env()
+    assert env["VAULT_ADDR"] == "https://vault.example"
+    assert env["VAULT_TOKEN"] == "tok-123"
+    assert env["VAULT_ROLE_ID"] == "role-456"
+
+
+def test_env_file_preserves_hash_in_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A # inside a value (not preceded by whitespace) is preserved."""
+    env_file = tmp_path / "vault.env"
+    env_file.write_text(
+        'VAULT_ADDR="https://vault.example/path#fragment"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ACB_VAULT_ENV", str(env_file))
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    env = cred_vault._vault_env()
+    assert env["VAULT_ADDR"] == "https://vault.example/path#fragment"
+
+
+def test_env_file_strips_comment_after_quoted_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inline comments after a quoted value are stripped, but the # inside the
+    quoted value is preserved (HIGH-2 from adversarial review)."""
+    env_file = tmp_path / "vault.env"
+    env_file.write_text(
+        'VAULT_TOKEN="abc # def" # real comment\n'
+        'VAULT_ADDR="https://vault.example" # prod\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ACB_VAULT_ENV", str(env_file))
+    for k in ("VAULT_TOKEN", "VAULT_ADDR"):
+        monkeypatch.delenv(k, raising=False)
+    env = cred_vault._vault_env()
+    assert env["VAULT_TOKEN"] == "abc # def"  # # inside quotes preserved
+    assert env["VAULT_ADDR"] == "https://vault.example"  # comment stripped
+
+
 def test_env_file_handles_bom(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_file = tmp_path / "vault.env"
     env_file.write_bytes("\ufeffVAULT_ADDR=https://from-bom\n".encode("utf-8"))

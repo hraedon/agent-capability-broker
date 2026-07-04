@@ -120,3 +120,41 @@ def test_cli_apply_emits_clean_provenance(
     assert event["result"] == "applied"
     # provenance must never carry a secret.
     assert SECRET not in log and "Authorization" not in log
+
+
+def test_reconcile_apply_error_is_handled(
+    tmp_path: Path, browsers: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If provider.apply() raises during reconcile --apply, the command reports
+    a failure instead of crashing with an unhandled traceback."""
+    cfg = _config_with_token(tmp_path)
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."e2e:chromium"]\nprovider="e2e"\npin="1.43.0"\nharnesses=["opencode"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(cfg))
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+
+    from agent_capability_broker.providers import E2eProvider
+
+    original_apply = E2eProvider.apply
+
+    def raising_apply(self: E2eProvider, action: object, adapter: object) -> object:
+        raise OSError("simulated disk error")
+
+    monkeypatch.setattr(E2eProvider, "apply", raising_apply)
+
+    import io
+    from contextlib import redirect_stdout
+
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["reconcile", "-m", str(manifest), "--apply"])
+
+        out = buf.getvalue()
+        assert "FAILED" in out.upper() or "failed" in out
+        assert rc != 0
+    finally:
+        monkeypatch.setattr(E2eProvider, "apply", original_apply)

@@ -207,3 +207,62 @@ def test_install_harness_emits_provenance_for_manual_actions(
     event = json.loads(log.strip())
     assert event["action"] == "manual"
     assert event["result"] == "skipped"
+
+
+def test_install_harness_multiple_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple capabilities are all provisioned in one run."""
+    _setup_oc(tmp_path, monkeypatch)
+    monkeypatch.setenv("ACB_TEST_SECRET_A", "secret-a")
+    monkeypatch.setenv("ACB_TEST_SECRET_B", "secret-b")
+
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."cred:cred-a"]\nprovider="cred"\nsource="env"\n'
+        'from_env="ACB_TEST_SECRET_A"\nharnesses=["opencode"]\n'
+        '[capability."cred:cred-b"]\nprovider="cred"\nsource="env"\n'
+        'from_env="ACB_TEST_SECRET_B"\nharnesses=["opencode"]\n',
+        encoding="utf-8",
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(["install-harness", "opencode", "-m", str(manifest)])
+
+    out = buf.getvalue()
+    assert rc == 0
+    assert (tmp_path / "oc" / "command" / "cred-cred-a.md").is_file()
+    assert (tmp_path / "oc" / "command" / "cred-cred-b.md").is_file()
+    assert "cred:cred-a" in out
+    assert "cred:cred-b" in out
+
+
+def test_install_harness_apply_error_is_handled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If provider.apply() raises, install-harness reports a failure instead of
+    crashing with an unhandled traceback."""
+    _setup_oc(tmp_path, monkeypatch)
+    monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
+    manifest = _cred_manifest(tmp_path)
+
+    from agent_capability_broker.providers import CredProvider
+
+    original_apply = CredProvider.apply
+
+    def raising_apply(self: CredProvider, action: object, adapter: object) -> object:
+        raise FileExistsError("simulated race condition")
+
+    monkeypatch.setattr(CredProvider, "apply", raising_apply)
+
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["install-harness", "opencode", "-m", str(manifest)])
+
+        out = buf.getvalue()
+        assert "FAILED" in out.upper() or "failed" in out
+        assert rc != 0
+    finally:
+        monkeypatch.setattr(CredProvider, "apply", original_apply)

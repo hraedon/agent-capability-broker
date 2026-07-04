@@ -49,6 +49,9 @@ def _parse_env_text(text: str) -> dict[str, str]:
     """Parse ``KEY=val`` lines, returning only ``VAULT*`` keys.
 
     Handles bash-style ``export KEY=val`` prefixes.  Strips surrounding quotes.
+    Strips inline comments (``# ...`` after the value) — but only when the
+    ``#`` is preceded by whitespace, so values like ``https://vault#fragment``
+    are preserved (LOW-3).
     """
     out: dict[str, str] = {}
     for line in text.splitlines():
@@ -59,7 +62,20 @@ def _parse_env_text(text: str) -> dict[str, str]:
         key = key.strip()
         if key.startswith("export "):
             key = key[len("export "):].strip()
-        val = val.strip().strip('"').strip("'")
+        val = val.strip()
+        # Handle quoted values: "value" or 'value' (possibly followed by # comment).
+        # The closing quote ends the value; anything after is a comment (HIGH-2).
+        if val and val[0] in ('"', "'"):
+            quote = val[0]
+            end = val.find(quote, 1)
+            if end != -1:
+                val = val[1:end]
+            else:
+                val = val.strip('"').strip("'")
+        else:
+            # Unquoted: strip inline comments (# preceded by whitespace).
+            if " #" in val or "\t#" in val:
+                val = val.split(" #", 1)[0].split("\t#", 1)[0].rstrip()
         if key and key.startswith("VAULT"):
             out[key] = val
     return out
