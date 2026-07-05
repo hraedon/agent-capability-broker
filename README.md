@@ -107,6 +107,9 @@ and reconciles reality to it.
 
 ## Status
 
-Charter stage (2026-06-15). The manifest schema, provider interface, harness
-adapters, and the read-only `doctor` report are the first deliverable — see
-`docs/capability-model.md` (design spine) and `plans/001-manifest-and-doctor.md`.
+Charter stage (2026-06-15). Landed through Plan 005: the manifest schema,
+provider interface (`cred`, `e2e`), harness adapters (Claude Code, opencode),
+and five verbs — `doctor` (read-only parity report), `shims` (read-only shim
+parity), `reconcile` (gated wiring generation), `exec` (inject-and-run), and
+`install-harness` (suite bootstrap). See `docs/capability-model.md` (design
+spine) and `plans/001`–`plans/005` for the build sequence.

@@ -109,6 +109,7 @@ agent-provenance and follows the family's CLI + skills conventions.
 
 ## Status
 
-Charter stage (2026-06-15). First deliverable: manifest schema + provider
-interface + harness adapters + read-only `doctor`. See
-`plans/001-manifest-and-doctor.md`.
+Charter stage (2026-06-15). Landed through Plan 005: manifest schema, provider
+interface, harness adapters, and the verbs `doctor`, `shims`, `reconcile`,
+`exec`, and `install-harness`. See `docs/capability-model.md` (design spine)
+and `plans/001`–`plans/005`.

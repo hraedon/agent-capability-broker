@@ -1,6 +1,6 @@
 # Plan 005 — Suite cohesion: capability provisioning as a bootstrap step
 
-**Status:** Proposed 2026-07-02
+**Status:** Landed 2026-07-03 (commit 1eca849)
 **Author:** Claude (Fable 5), from the 2026-07-02 agent-suite deployment review
 **Strategic role:** acb keeps agents at capability + credential parity across
 harnesses. In a suite deployment it is bootstrap step 5 (blueprint §2.3): after
