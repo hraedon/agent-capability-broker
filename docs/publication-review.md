@@ -29,7 +29,7 @@ fixed before publication:
 
 | # | Where | Was | Now | Found by |
 |---|---|---|---|---|
-| 1 | `docs/capability-model.md` §2 | `cred:svc-gpolens` (real service-account name) | `cred:svc-bot` | primary |
+| 1 | `docs/capability-model.md` §2 | a real service-account name (redacted) | `cred:svc-bot` | primary |
 | 2 | `src/.../cred_vault.py` `_split_mount` docstring | `kv/homelab/ad/...` (mirrors real mount) | `kv/example/ad/...` | primary |
 | 3 | `plans/002-act-path.md` | "z.ai server's bearer token" (names a real provider) | "a sibling server's bearer token" | primary |
 | 4 | `.gitignore` | `.cw-vault-ci.env` (names a real infra file; redundant with `*-vault*.env`) | removed | opencode |

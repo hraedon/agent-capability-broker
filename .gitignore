@@ -34,3 +34,6 @@ build/
 # Editors / OS
 .DS_Store
 *.swp
+
+# never commit the local denylist (identifier gate)
+.identifiers-denylist.local
