@@ -10,7 +10,10 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
+
+import platformdirs
 
 # Providers the core knows how to dispatch to. The core validates only that a
 # capability names a known provider and lists harnesses; provider-specific keys
@@ -33,21 +36,45 @@ class ManifestError(ValueError):
     """A capabilities.toml that violates the core contract."""
 
 
+@lru_cache(maxsize=1)
+def _user_config_root() -> Path:
+    """Platform-idiomatic user-config root (Plan 003 WI-3.1).
+
+    ``~/.config`` on Linux, ``%APPDATA%`` on Windows — replaces the hardcoded
+    ``~/.config`` default. Callers honor ``$XDG_CONFIG_HOME`` explicitly ahead
+    of this fallback so the suite env precedence stays visible.
+    """
+    return Path(platformdirs.user_config_dir())
+
+
+@lru_cache(maxsize=1)
+def _user_state_root() -> Path:
+    """Platform-idiomatic user-state root (Plan 003 WI-3.1).
+
+    ``~/.local/state`` on Linux, ``%LOCALAPPDATA%`` on Windows — replaces the
+    hardcoded ``~/.local/state`` default. Callers honor ``$XDG_STATE_HOME``
+    explicitly ahead of this fallback.
+    """
+    return Path(platformdirs.user_state_dir())
+
+
 def suite_config_dir() -> Path | None:
     """The suite's shared config directory (blueprint §2.1).
 
     ``$AGENT_SUITE_CONFIG`` may point at a file (e.g. ``suite.env``) or a
     directory.  If a file, its parent is the config dir.  When unset, the
-    default is ``~/.config/agent-suite/``.  Returns ``None`` when the env
-    var is unset *and* the default does not exist (so callers don't waste I/O
-    probing a non-existent suite location ahead of the acb-private fallback).
+    default is the platform config root's ``agent-suite/`` subdir
+    (``~/.config/agent-suite/`` on Linux, ``%APPDATA%/agent-suite/`` on
+    Windows).  Returns ``None`` when the env var is unset *and* the default
+    does not exist (so callers don't waste I/O probing a non-existent suite
+    location ahead of the acb-private fallback).
     """
     env = os.environ.get("AGENT_SUITE_CONFIG")
     if env:
         p = Path(env)
         return p.parent if p.is_file() else p
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
+    base = Path(xdg) if xdg else _user_config_root()
     default = base / "agent-suite"
     return default if default.is_dir() else None
 
@@ -56,8 +83,9 @@ def default_manifest_locations() -> list[Path]:
     """Ordered, CWD-independent manifest search path (see `resolve_manifest`).
 
     Precedence (Plan 005 WI-1.1): an ``$ACB_MANIFEST`` override, then the
-    suite config dir (``$AGENT_SUITE_CONFIG`` → ``~/.config/agent-suite/``)
-    when present, then the acb-private XDG location, then CWD for in-repo dev.
+    suite config dir (``$AGENT_SUITE_CONFIG`` → the platform config root's
+    ``agent-suite/`` subdir) when present, then the acb-private XDG location,
+    then CWD for in-repo dev.
     The suite dir sits ahead of the acb-private default so a suite deployment
     can declare one manifest for the whole estate.
     """
@@ -69,7 +97,7 @@ def default_manifest_locations() -> list[Path]:
     if suite is not None:
         locs.append(suite / "capabilities.toml")
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
+    base = Path(xdg) if xdg else _user_config_root()
     locs.append(base / "acb" / "capabilities.toml")
     locs.append(Path("capabilities.toml"))  # CWD, for working inside the acb repo
     return locs
@@ -82,7 +110,8 @@ def resolve_manifest(explicit: str | os.PathLike[str] | None = None) -> Path:
     `default_manifest_locations` are tried in order and the first that exists is
     returned. If none exist, raise `ManifestError` naming *every* location
     checked — so an agent in another harness is told where to put the file
-    instead of guessing (`~/.acb`, `~/.config/acb`, …) and giving up.
+    instead of guessing (`~/.acb`, the platform config root's `acb/`, …) and
+    giving up.
     """
     if explicit is not None:
         return Path(explicit)
@@ -93,7 +122,8 @@ def resolve_manifest(explicit: str | os.PathLike[str] | None = None) -> Path:
     locations = ", ".join(str(p) for p in searched)
     raise ManifestError(
         f"no capabilities.toml found (looked in: {locations}). "
-        f"Set $ACB_MANIFEST or create ~/.config/acb/capabilities.toml"
+        f"Set $ACB_MANIFEST or create capabilities.toml in the platform config "
+        f"dir (e.g. ~/.config/acb/ on Linux, %APPDATA%/acb/ on Windows)"
     )
 
 

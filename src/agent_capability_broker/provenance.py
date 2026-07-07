@@ -15,7 +15,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .model import ActionResult
+from .model import ActionResult, _user_state_root
 
 
 def state_dir() -> Path:
@@ -24,7 +24,7 @@ def state_dir() -> Path:
     if env:
         return Path(env)
     xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    base = Path(xdg) if xdg else _user_state_root()
     return base / "acb"
 
 

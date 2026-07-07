@@ -403,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="read-only parity report across harnesses")
     doctor.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON (suite health shape)")
     doctor.set_defaults(func=_cmd_doctor)
@@ -419,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rec.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     rec.add_argument(
         "--apply", action="store_true", help="perform the changes (default: dry-run)"
@@ -431,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ex.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     ex.add_argument("capability", help="capability id, e.g. cred:svc-bot")
     ex.add_argument("argv", nargs=argparse.REMAINDER, help="-- command and args to run")
@@ -446,7 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ih.add_argument(
         "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, suite config, ~/.config/acb, then ./)",
+        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     ih.add_argument(
         "--dry-run", action="store_true",

@@ -18,8 +18,10 @@ classifiers = [
     "Topic :: Security",
 ]
 # The deterministic core is stdlib-only by charter (tomllib, json, subprocess,
-# argparse). Provider backends are optional extras below.
-dependencies = []
+# argparse): the verdict/truth path has no third-party deps. platformdirs is the
+# sole runtime dep — config-dir portability only (Plan 003 WI-3.1), exempted in
+# tests/test_arch.py::STDLIB_OK as the sole permitted non-stdlib core import.
+dependencies = ["platformdirs>=4.3,<5"]
 
 [project.optional-dependencies]
 # Pins include upper bounds to keep CI reproducible against future majors.

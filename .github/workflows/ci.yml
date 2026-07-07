@@ -25,3 +25,33 @@ jobs:
         run: mypy src
       - name: Test
         run: pytest -q
+
+  # Plan 003 WI-5.1 — prove acb imports and unit tests pass on native Windows.
+  # acb's core is stdlib-only; this guards against future non-portable additions
+  # (os.O_NOFOLLOW, fcntl, etc.). The [cred] extra's hvac tests skip cleanly —
+  # no Vault on the windows-latest runner.
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Architecture test (import boundary)
+        run: pytest tests/test_arch.py -q
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Type check (mypy)
+        run: mypy src
+
+      - name: Run tests
+        run: pytest --tb=short -q

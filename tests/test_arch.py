@@ -19,9 +19,11 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "agent_capability_broker"
 # optional-import modules are added to ALLOWED_EXTRA, not here.
 CORE_MODULES = ["model.py", "cli.py", "adapters.py", "providers.py", "provenance.py"]
 STDLIB_OK = {
-    "__future__", "argparse", "ast", "dataclasses", "enum", "json",
+    "__future__", "argparse", "ast", "dataclasses", "enum", "functools", "json",
     "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing", "datetime",
     "subprocess",
+    # platformdirs: config-dir portability (not the truth/verdict path) — sole permitted runtime dep
+    "platformdirs",
 }
 # Relative imports of these core modules are allowed (e.g. `from .model import ...`).
 CORE_INTERNAL = {"model", "cli", "adapters", "providers", "provenance"}

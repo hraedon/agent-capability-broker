@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .model import Capability, suite_config_dir
+from .model import Capability, _user_config_root, suite_config_dir
 
 _K8S_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
@@ -26,7 +26,9 @@ def _default_vault_env_paths() -> list[Path]:
     Precedence mirrors the manifest resolution: ``$ACB_VAULT_ENV`` (explicit
     shell override) → suite config dir / ``vault.env`` → suite config dir /
     ``suite.env`` (may also carry ``VAULT_*`` vars) → acb-private
-    ``~/.config/acb/vault.env``.  Only files that *exist* are loaded by the
+    ``acb/vault.env`` under the platform config root
+    (``~/.config/acb/vault.env`` on Linux, ``%APPDATA%/acb/vault.env`` on
+    Windows).  Only files that *exist* are loaded by the
     caller; this list may include non-existent paths.  ``_parse_env_text``
     filters to ``VAULT*`` keys so loading ``suite.env`` is safe — ``REGISTA_*``
     and other suite vars are ignored.
@@ -40,7 +42,7 @@ def _default_vault_env_paths() -> list[Path]:
         paths.append(suite / "vault.env")
         paths.append(suite / "suite.env")
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
+    base = Path(xdg) if xdg else _user_config_root()
     paths.append(base / "acb" / "vault.env")
     return paths
 
@@ -89,7 +91,8 @@ def _load_env_file(env_path: str | os.PathLike[str] | None = None) -> dict[str, 
     Path precedence (Plan 005 WI-1.1/WI-3.1): an explicit ``env_path`` (e.g.
     ``doctor`` probing a capability's *declared* access plane, independent of
     the shell), else ``$ACB_VAULT_ENV``, else the suite config dir's
-    ``vault.env``, else ``~/.config/acb/vault.env``.  Each harness points
+    ``vault.env``, else ``acb/vault.env`` under the platform config root.  Each
+    harness points
     ``ACB_VAULT_ENV`` at its own file for role separation.
 
     Handles bash-style ``export KEY=val`` prefixes and a UTF-8 BOM.  A malformed
