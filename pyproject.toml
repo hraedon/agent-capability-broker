@@ -73,3 +73,8 @@ strict = true
 [[tool.mypy.overrides]]
 module = "hvac.*"
 ignore_missing_imports = true
+
+# pyyaml is imported lazily by HermesAdapter (available in any Hermes install).
+[[tool.mypy.overrides]]
+module = "yaml.*"
+ignore_missing_imports = true

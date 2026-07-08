@@ -70,6 +70,8 @@ def test_shim_gap_single_harness_has_nothing_to_compare() -> None:
 def _point_env(monkeypatch: pytest.MonkeyPatch, claude_root: Path, oc_root: Path) -> None:
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(claude_root / "settings.json"))
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(oc_root / "opencode.json"))
+    # Point hermes at a temp path so the host's real ~/.hermes doesn't leak in.
+    monkeypatch.setenv("ACB_HERMES_CONFIG", str(oc_root / "hermes.yaml"))
 
 
 def test_cli_shims_reports_gap_and_exits_nonzero(
