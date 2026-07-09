@@ -27,6 +27,9 @@ dev = [
     "pytest>=8.3,<9",
     "ruff>=0.7,<1",
     "mypy>=1.13,<2",
+    # pyyaml so the HermesAdapter tests (importorskip("yaml")) run in CI under
+    # the plain [dev] install, not silently skipped.
+    "pyyaml>=6.0,<7",
 ]
 # The cred provider's Vault/HTTP client. The core never imports this; when
 # absent, `cred` inspect degrades to UNKNOWN with a reason instead of crashing.
