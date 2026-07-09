@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import platformdirs
 import pytest
 
 from agent_capability_broker.model import (
@@ -92,15 +93,16 @@ def test_missing_manifest_names_every_location(
     monkeypatch.delenv("ACB_MANIFEST", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(ManifestError, match=r"looked in:.*acb/capabilities\.toml"):
+    with pytest.raises(ManifestError, match=r"looked in:.*acb[/\\]capabilities\.toml"):
         resolve_manifest()
 
 
 def test_user_config_root_fallback_when_xdg_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Plan 003 WI-3.1: with XDG_CONFIG_HOME unset, _user_config_root() falls
-    back to the platformdirs default (~/.config on Linux)."""
+    back to the platformdirs default (~/.config on Linux, %LOCALAPPDATA% on
+    Windows)."""
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     _user_config_root.cache_clear()
     result = _user_config_root()
     assert isinstance(result, Path)
-    assert result == Path.home() / ".config"
+    assert result == Path(platformdirs.user_config_dir())
