@@ -249,8 +249,11 @@ class HermesAdapter:
     """Hermes Agent: `~/.hermes/config.yaml` -> `mcp_servers`.
 
     Hermes uses YAML (not JSON) for config and the same ``SKILL.md`` skill format
-    as Claude Code.  YAML parsing is done via ``pyyaml`` imported lazily inside
-    each method so the core stays stdlib-only when Hermes is not present.
+    as Claude Code.  YAML parsing is done via ``pyyaml`` (the ``[hermes]`` extra),
+    imported lazily inside each method so the core stays stdlib-only on hosts
+    without Hermes installed.  The read path (``mcp_servers``) degrades to
+    empty when the extra is absent; the act path (``add_mcp_server``) raises a
+    clear error.
     """
 
     name = "hermes"
@@ -269,8 +272,14 @@ class HermesAdapter:
 
     @property
     def vault_env_path(self) -> Path:
-        """Where this harness's Vault AppRole ``.env`` lives: beside the config."""
-        return self.config_path.parent / ".env"
+        """Where this harness's Vault AppRole ``.env`` lives: beside the config.
+
+        Matches the sibling adapters (Claude/opencode) and the ``cred_vault``
+        defaults: ``vault.env``, not ``.env`` — the latter is auto-sourced by
+        direnv/docker/python-dotenv, so a Vault AppRole secret placed there would
+        risk surfacing into other tools' env (violates "Inject, don't surface").
+        """
+        return self.config_path.parent / "vault.env"
 
     def available(self) -> bool:
         return self.config_path.is_file()
@@ -295,7 +304,13 @@ class HermesAdapter:
         Backs up the config first and refuses to clobber an existing server of
         the same name.
         """
-        import yaml  # lazy: pyyaml available in any Hermes installation
+        try:
+            import yaml  # noqa: PLC0415 (lazy: needs the [hermes] extra)
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hermes config writes need the [hermes] extra: "
+                "pip install 'agent-capability-broker[hermes]'"
+            ) from exc
 
         data = _load_yaml(self.config_path)
         container = data.get("mcp_servers")
@@ -323,14 +338,29 @@ class HermesAdapter:
 def _load_yaml(path: Path) -> dict[str, object]:
     """Load a YAML config file, returning ``{}`` on missing/corrupt (mirrors
     ``_load_json``).  ``pyyaml`` is imported lazily — the core stays
-    stdlib-only when Hermes is not present."""
+    stdlib-only when Hermes is not present.  A missing ``[hermes]`` extra is
+    reported distinctly from a corrupt file but still degrades to ``{}`` so the
+    read path (``doctor``) never crashes; the act path (``add_mcp_server``)
+    raises instead."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}  # file missing — no yaml needed (mirrors _load_json)
     try:
         import yaml  # noqa: PLC0415 (lazy by design)
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError:
+        data = yaml.safe_load(text)
+    except ImportError:
+        import sys
+
+        print(
+            f"warning: {path}: cannot parse Hermes YAML config without the "
+            "[hermes] extra (pip install 'agent-capability-broker[hermes]'); "
+            "treating as empty",
+            file=sys.stderr,
+        )
         return {}
-    except Exception as exc:  # pyyaml raises YAMLError and others
+    except Exception as exc:  # pyyaml raises YAMLError and others on malformed input
         import sys
 
         print(f"warning: {path}: corrupted YAML ({exc}); treating as empty", file=sys.stderr)

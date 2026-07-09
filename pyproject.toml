@@ -33,6 +33,12 @@ dev = [
 cred = [
     "hvac>=2.1,<3",
 ]
+# Hermes config is YAML, parsed by pyyaml. The core never imports this; on hosts
+# without Hermes the read path degrades to empty (a warning, not a crash) and the
+# act path (`add_mcp_server`) raises a clear install hint.
+hermes = [
+    "pyyaml>=6.0,<7",
+]
 # Optional narration layer, kept out of the truth path. Empty placeholder.
 narration = []
 
@@ -74,7 +80,7 @@ strict = true
 module = "hvac.*"
 ignore_missing_imports = true
 
-# pyyaml is imported lazily by HermesAdapter (available in any Hermes install).
+# pyyaml is imported lazily by HermesAdapter (the [hermes] extra); no type stubs.
 [[tool.mypy.overrides]]
 module = "yaml.*"
 ignore_missing_imports = true
