@@ -243,3 +243,126 @@ class OpencodeAdapter:
         """Render a command shim at `command/<name>.md`. Create-only (refuses to
         overwrite a hand-edited shim); callers guard on `command_shims()`."""
         return _create_file(self.shims_path / f"{name}.md", content)
+
+
+class HermesAdapter:
+    """Hermes Agent: `~/.hermes/config.yaml` -> `mcp_servers`.
+
+    Hermes uses YAML (not JSON) for config and the same ``SKILL.md`` skill format
+    as Claude Code.  YAML parsing is done via ``pyyaml`` (the ``[hermes]`` extra),
+    imported lazily inside each method so the core stays stdlib-only on hosts
+    without Hermes installed.  The read path (``mcp_servers``) degrades to
+    empty when the extra is absent; the act path (``add_mcp_server``) raises a
+    clear error.
+    """
+
+    name = "hermes"
+
+    def __init__(self, config_path: Path | None = None) -> None:
+        env = os.environ.get("ACB_HERMES_CONFIG")
+        self.config_path = (
+            config_path
+            or (Path(env) if env else Path.home() / ".hermes" / "config.yaml")
+        )
+
+    @property
+    def shims_path(self) -> Path:
+        """Where Hermes keeps skill shims: ``skills/`` beside the config."""
+        return self.config_path.parent / "skills"
+
+    @property
+    def vault_env_path(self) -> Path:
+        """Where this harness's Vault AppRole ``.env`` lives: beside the config.
+
+        Matches the sibling adapters (Claude/opencode) and the ``cred_vault``
+        defaults: ``vault.env``, not ``.env`` — the latter is auto-sourced by
+        direnv/docker/python-dotenv, so a Vault AppRole secret placed there would
+        risk surfacing into other tools' env (violates "Inject, don't surface").
+        """
+        return self.config_path.parent / "vault.env"
+
+    def available(self) -> bool:
+        return self.config_path.is_file()
+
+    def mcp_servers(self) -> dict[str, McpServer]:
+        return _servers_from(_load_yaml(self.config_path).get("mcp_servers"))
+
+    def command_shims(self) -> set[str]:
+        """Skill names this harness advertises: ``skills/<name>/SKILL.md`` dirs.
+
+        Same shape as Claude Code.  Read-only — only names are enumerated, never
+        the shim bodies.  Missing ``skills/`` dir => empty set, not an error.
+        """
+        skills = self.shims_path
+        if not skills.is_dir():
+            return set()
+        return {d.name for d in skills.iterdir() if (d / "SKILL.md").is_file()}
+
+    def add_mcp_server(self, name: str, command: list[str]) -> WriteResult:
+        """Add a local MCP server to Hermes's ``mcp_servers`` (command list shape).
+
+        Backs up the config first and refuses to clobber an existing server of
+        the same name.
+        """
+        try:
+            import yaml  # noqa: PLC0415 (lazy: needs the [hermes] extra)
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hermes config writes need the [hermes] extra: "
+                "pip install 'agent-capability-broker[hermes]'"
+            ) from exc
+
+        data = _load_yaml(self.config_path)
+        container = data.get("mcp_servers")
+        if not isinstance(container, dict):
+            container = {}
+            data["mcp_servers"] = container
+        if name in container:
+            raise KeyError(f"server {name!r} already present in mcp_servers of {self.config_path}")
+
+        backup = _backup(self.config_path) if self.config_path.exists() else None
+        container[name] = {"command": list(command), "enabled": True}
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(
+            yaml.dump(data, default_flow_style=False, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+        return WriteResult(changed=True, backup_path=backup)
+
+    def write_skill_shim(self, name: str, content: str) -> WriteResult:
+        """Render a skill shim at ``skills/<name>/SKILL.md``.  Create-only (refuses
+        to overwrite a hand-edited shim); callers guard on ``command_shims()``."""
+        return _create_file(self.shims_path / name / "SKILL.md", content)
+
+
+def _load_yaml(path: Path) -> dict[str, object]:
+    """Load a YAML config file, returning ``{}`` on missing/corrupt (mirrors
+    ``_load_json``).  ``pyyaml`` is imported lazily — the core stays
+    stdlib-only when Hermes is not present.  A missing ``[hermes]`` extra is
+    reported distinctly from a corrupt file but still degrades to ``{}`` so the
+    read path (``doctor``) never crashes; the act path (``add_mcp_server``)
+    raises instead."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}  # file missing — no yaml needed (mirrors _load_json)
+    try:
+        import yaml  # noqa: PLC0415 (lazy by design)
+
+        data = yaml.safe_load(text)
+    except ImportError:
+        import sys
+
+        print(
+            f"warning: {path}: cannot parse Hermes YAML config without the "
+            "[hermes] extra (pip install 'agent-capability-broker[hermes]'); "
+            "treating as empty",
+            file=sys.stderr,
+        )
+        return {}
+    except Exception as exc:  # pyyaml raises YAMLError and others on malformed input
+        import sys
+
+        print(f"warning: {path}: corrupted YAML ({exc}); treating as empty", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}

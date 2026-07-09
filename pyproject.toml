@@ -29,11 +29,20 @@ dev = [
     "pytest>=8.3,<9",
     "ruff>=0.7,<1",
     "mypy>=1.13,<2",
+    # pyyaml so the HermesAdapter tests (importorskip("yaml")) run in CI under
+    # the plain [dev] install, not silently skipped.
+    "pyyaml>=6.0,<7",
 ]
 # The cred provider's Vault/HTTP client. The core never imports this; when
 # absent, `cred` inspect degrades to UNKNOWN with a reason instead of crashing.
 cred = [
     "hvac>=2.1,<3",
+]
+# Hermes config is YAML, parsed by pyyaml. The core never imports this; on hosts
+# without Hermes the read path degrades to empty (a warning, not a crash) and the
+# act path (`add_mcp_server`) raises a clear install hint.
+hermes = [
+    "pyyaml>=6.0,<7",
 ]
 # Optional narration layer, kept out of the truth path. Empty placeholder.
 narration = []
@@ -74,4 +83,9 @@ strict = true
 # hvac (the optional [cred] backend) ships no type stubs.
 [[tool.mypy.overrides]]
 module = "hvac.*"
+ignore_missing_imports = true
+
+# pyyaml is imported lazily by HermesAdapter (the [hermes] extra); no type stubs.
+[[tool.mypy.overrides]]
+module = "yaml.*"
 ignore_missing_imports = true

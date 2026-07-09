@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import provenance
-from .adapters import ClaudeAdapter, OpencodeAdapter
+from .adapters import ClaudeAdapter, HermesAdapter, OpencodeAdapter
 from .model import Action, ActionResult, Capability, McpServer, Status, Verdict
 
 _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webkit")
@@ -238,7 +238,7 @@ class E2eProvider:
                 backup_path=str(res.backup_path),
             )
         if action.kind == "add_mcp":
-            if not isinstance(adapter, ClaudeAdapter | OpencodeAdapter):
+            if not isinstance(adapter, ClaudeAdapter | OpencodeAdapter | HermesAdapter):
                 return ActionResult(action, "skipped", "writing not supported for this harness")
             if action.target in adapter.mcp_servers():
                 return ActionResult(action, "skipped", "already present")
@@ -342,7 +342,7 @@ capability is present and the broker reachable; `acb reconcile` (re)renders this
 `acb install-harness {harness}` is the bootstrap step that renders all shims for
 this harness at once.
 """
-    if harness == "claude":
+    if harness in ("claude", "hermes"):
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
     else:
         front = f'---\ndescription: "{desc}"\n---\n\n'
@@ -430,7 +430,7 @@ class CredProvider:
         content = str(action.payload.get("content", ""))
         if isinstance(adapter, OpencodeAdapter):
             res = adapter.write_command_shim(action.target, content)
-        elif isinstance(adapter, ClaudeAdapter):
+        elif isinstance(adapter, ClaudeAdapter | HermesAdapter):
             res = adapter.write_skill_shim(action.target, content)
         else:
             return ActionResult(action, "skipped", "shim rendering not supported for this harness")
@@ -502,4 +502,8 @@ PROVIDERS: dict[str, Provider] = {
 
 def adapters() -> dict[str, HarnessAdapter]:
     """Fresh adapter instances bound to this host's default config locations."""
-    return {"claude": ClaudeAdapter(), "opencode": OpencodeAdapter()}
+    return {
+        "claude": ClaudeAdapter(),
+        "opencode": OpencodeAdapter(),
+        "hermes": HermesAdapter(),
+    }
