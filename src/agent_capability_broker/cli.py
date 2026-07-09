@@ -68,6 +68,55 @@ def _print_table(verdicts: list[Verdict]) -> None:
         print(line)
 
 
+# Suite-health per-check vocabulary (Plan 006 WI-1.1). Mirrors the
+# ok/warn/fail/skip lexicon cairn emits (cairn/_doctor.py): a hard fail
+# (present_broken / absent) makes the component unhealthy; a soft unknown
+# (cannot determine — e.g. the harness config is absent on this box) is a
+# warning that degrades without failing; not_applicable is a skip.
+_CHECK_STATUS: dict[Status, str] = {
+    Status.PRESENT_OK: "ok",
+    Status.PRESENT_BROKEN: "fail",
+    Status.ABSENT: "fail",
+    Status.UNKNOWN: "warn",
+    Status.NOT_APPLICABLE: "skip",
+}
+
+
+def _doctor_checks(verdicts: list[Verdict]) -> list[dict[str, object]]:
+    """Render verdicts as suite-contract check dicts.
+
+    Each check carries a ``name`` (the capability@harness cell it probes), the
+    normalized ``status`` (ok/warn/fail/skip — the sibling vocabulary), a
+    human-readable ``detail``, and the acb-specific ``capability``/``harness``
+    pair for matrix context.
+    """
+    return [
+        {
+            "name": f"{v.capability}@{v.harness}",
+            "capability": v.capability,
+            "harness": v.harness,
+            "status": _CHECK_STATUS[v.status],
+            "detail": v.detail,
+        }
+        for v in verdicts
+    ]
+
+
+def _classify_health(checks: list[dict[str, object]]) -> tuple[bool, bool]:
+    """Classify component health from checks the way the siblings do.
+
+    Mirrors cairn's ``run_doctor`` (cairn/_doctor.py): ``ok`` is false when any
+    check failed; ``degraded`` is true only when nothing failed but a warning
+    is present. ``failed`` is the implicit third state (``ok`` false). The
+    suite-doctor umbrella reads these two booleans (bootstrap-contract §3).
+    """
+    has_fail = any(str(c["status"]) == "fail" for c in checks)
+    has_warn = any(str(c["status"]) == "warn" for c in checks)
+    ok = not has_fail
+    degraded = ok and has_warn
+    return ok, degraded
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     try:
         verdicts = _inspect_all(resolve_manifest(args.manifest))
@@ -75,21 +124,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    checks = _doctor_checks(verdicts)
+    ok, degraded = _classify_health(checks)
+
     if args.json:
         from . import __version__
 
         payload = {
             "component": "acb",
             "version": __version__,
-            "checks": [
-                {
-                    "capability": v.capability,
-                    "harness": v.harness,
-                    "status": v.status.value,
-                    "detail": v.detail,
-                }
-                for v in verdicts
-            ],
+            # The suite-doctor umbrella classifies a component from the
+            # top-level ok/degraded booleans (bootstrap-contract §3); without
+            # them it defaults ok→false and reports a healthy box as failed.
+            "ok": ok,
+            "degraded": degraded,
+            "checks": checks,
             # acb has no direct regista runtime dependency (by design); report
             # the honestly-absent state rather than faking a reachable verdict.
             "regista": {"reachable": None},
@@ -98,9 +147,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     else:
         _print_table(verdicts)
 
-    # Parity gate: non-zero if anything is broken or absent (cron/CI-usable).
-    bad = {Status.PRESENT_BROKEN, Status.ABSENT}
-    return 1 if any(v.status in bad for v in verdicts) else 0
+    # Exit-code consistent with the JSON verdict (sibling convention: exit 0
+    # for ok and degraded, non-zero on a hard fail). Same parity gate as before
+    # — present_broken/absent fail; unknown/not_applicable do not.
+    return 0 if ok else 1
 
 
 def _shim_gap(surfaces: dict[str, set[str]]) -> set[str]:
