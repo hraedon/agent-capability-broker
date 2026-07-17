@@ -47,6 +47,17 @@ def test_unknown_harness_rejected(tmp_path: Path) -> None:
         parse_manifest(p)
 
 
+def test_codex_harness_is_recognized(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        '[capability."cred:a"]\nprovider = "cred"\nharnesses = ["codex"]\n',
+    )
+
+    [capability] = parse_manifest(path)
+
+    assert capability.harnesses == ("codex",)
+
+
 def test_empty_manifest_rejected(tmp_path: Path) -> None:
     p = _write(tmp_path, "# nothing here\n")
     with pytest.raises(ManifestError, match="no .* entries"):

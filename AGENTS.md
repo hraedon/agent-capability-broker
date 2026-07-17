@@ -40,8 +40,11 @@ important rule here. Read the Hard rules.
     acting verb **emits a provenance event**.
 - **Inject, don't surface.** The default credential verb injects into the child
   process (env / short-lived temp file) and never returns the secret to the
-  model's context. Agents log everything; a brokered secret in a transcript is a
-  leaked secret. `get` exists as an escape hatch and must be explicit.
+  model's context through ACB-controlled output. Agents log everything; a
+  brokered secret in a transcript is a leaked secret. For `source = "suite"`,
+  the exact manifest-qualified child inherits stdout/stderr and is itself part
+  of the trust boundary; never substitute a shell, interpreter, or unreviewed
+  wrapper. `get` exists as an escape hatch and must be explicit.
 - **`acb` is a client, never a store.** No credential, token, or browser session
   is persisted in `acb`'s own state. Vault is the credential backend; a remote
   browser endpoint is the E2E backend. `acb` holds neither at rest.
@@ -94,6 +97,11 @@ Each adapter reads and renders one harness's wiring:
 
 Adapters must treat existing configs as **secret-bearing**: read for diffing,
 write only via the gated act path (backup-first, no secret clobber).
+
+`codex` is part of the closed suite harness set, but `install-harness codex`
+currently returns an explicit non-zero `unsupported` result until Plan 007
+lands. Hermes remains a component-private explicit target and is not part of
+the suite's stable `all` expansion.
 
 Beyond the MCP capability layer, each adapter also reads its **command/skill shim
 surface** (`command_shims()`): opencode `command/<name>.md` stems and Claude

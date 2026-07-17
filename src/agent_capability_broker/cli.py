@@ -10,8 +10,10 @@ provenance on every act.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from . import provenance
@@ -26,6 +28,8 @@ from .model import (
     resolve_manifest,
 )
 from .providers import PROVIDERS, adapters
+
+_STABLE_INSTALL_HARNESSES = ("claude", "opencode")
 
 
 def _inspect_all(manifest_path: Path) -> list[Verdict]:
@@ -367,6 +371,81 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         return 2
 
 
+def _cmd_install_harness_all(args: argparse.Namespace) -> int:
+    """Expand the public stable set and aggregate contract-shaped records."""
+
+    try:
+        manifest_path = resolve_manifest(args.manifest)
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    records: list[dict[str, object]] = []
+    child_codes: list[int] = []
+    for harness in _STABLE_INSTALL_HARNESSES:
+        child_args = argparse.Namespace(
+            **{
+                **vars(args),
+                "harness": harness,
+                "manifest": str(manifest_path),
+                "json": True,
+            }
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            child_code = _cmd_install_harness(child_args)
+        child_codes.append(child_code)
+        try:
+            child_payload = json.loads(output.getvalue())
+        except json.JSONDecodeError:
+            child_payload = None
+        if not isinstance(child_payload, dict):
+            child_payload = {
+                "tool": "acb",
+                "harness": harness,
+                "user": None,
+                "status": "failed",
+                "actions": [],
+                "no_op": False,
+            }
+        records.append(child_payload)
+
+    expected_code = 2 if args.dry_run else 0
+    installed = all(
+        code == expected_code and record.get("status") == "installed"
+        for code, record in zip(child_codes, records, strict=True)
+    )
+    no_op = installed and all(record.get("no_op") is True for record in records)
+    actions: list[dict[str, object]] = []
+    for record in records:
+        record_actions = record.get("actions")
+        if isinstance(record_actions, list):
+            actions.extend(
+                action for action in record_actions if isinstance(action, dict)
+            )
+    payload = {
+        "tool": "acb",
+        "harness": "all",
+        "user": None,
+        "status": "installed" if installed else "failed",
+        "actions": actions,
+        "no_op": no_op,
+        "results": records,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        for record in records:
+            print(
+                f"{record['harness']}: {record['status']}"
+                + (" (no-op)" if record.get("no_op") is True else "")
+            )
+
+    if not installed:
+        return 1
+    return 2 if args.dry_run else 0
+
+
 def _cmd_install_harness(args: argparse.Namespace) -> int:
     """Install acb's shims into one harness and verify each capability.
 
@@ -375,13 +454,42 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
     runs a focused doctor to report per-capability status.  Re-runnable: a
     fully-provisioned harness yields a no-op plan and all-PRESENT_OK verdicts.
     """
+    if args.harness == "all":
+        return _cmd_install_harness_all(args)
+
     if args.harness not in KNOWN_HARNESSES:
         print(
             f"error: unknown harness {args.harness!r} "
-            f"(known: {sorted(KNOWN_HARNESSES)})",
+            f"(known: {sorted(KNOWN_HARNESSES | {'all'})})",
             file=sys.stderr,
         )
         return 2
+
+    if args.harness == "codex":
+        unsupported_detail = (
+            "Codex adapter is not implemented; no capability wiring "
+            "was changed (Plan 007)"
+        )
+        payload = {
+            "tool": "acb",
+            "harness": "codex",
+            "user": None,
+            "status": "unsupported",
+            "actions": [
+                {
+                    "kind": "unsupported",
+                    "path": "",
+                    "detail": unsupported_detail,
+                }
+            ],
+            "no_op": False,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print("codex: unsupported (not wired)")
+            print(f"  {unsupported_detail}")
+        return 1
 
     try:
         manifest_path = resolve_manifest(args.manifest)
@@ -392,22 +500,41 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
     plan = _plan_for_harness(manifest_path, args.harness)
 
     if args.dry_run:
+        payload = {
+            "tool": "acb",
+            "harness": args.harness,
+            "user": None,
+            "status": "installed",
+            "actions": [
+                {
+                    "kind": action.kind,
+                    "path": action.target,
+                    "detail": action.summary,
+                }
+                for action in plan
+            ],
+            "no_op": not plan,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 2
         if not plan:
             print(f"{args.harness}: nothing to install — all capabilities present")
-            return 0
+            return 2
         for action in plan:
             verb = "would apply" if action.kind != "manual" else "manual"
             print(f"[{verb}] {action.capability} / {action.harness}: {action.summary}")
         auto = [a for a in plan if a.kind != "manual"]
         if auto:
             print(f"\n{len(auto)} action(s) planned. Re-run without --dry-run to perform them.")
-        return 1 if plan else 0
+        return 2
 
     # Apply phase: render shims / wire MCP for this harness.
     harness_adapters = adapters()
     adapter = harness_adapters.get(args.harness)
     applied = 0
     skipped = 0
+    action_results: list[ActionResult] = []
     for action in plan:
         if adapter is None or not adapter.available():
             print(f"[SKIP] {action.capability}: adapter unavailable")
@@ -424,11 +551,13 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
         except (OSError, KeyError) as exc:
             result = ActionResult(action, "failed", f"apply error: {exc}")
         provenance.emit(result)
+        action_results.append(result)
         tag = result.status.upper()
         line = f"[{tag}] {action.capability}: {result.detail or action.summary}"
         if result.backup_path:
             line += f"  (backup: {result.backup_path})"
-        print(line)
+        if not args.json:
+            print(line)
         if result.status == "applied":
             applied += 1
         else:
@@ -436,13 +565,42 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
 
     # Verify phase: re-inspect each capability for this harness.
     verdicts = _inspect_for_harness(manifest_path, args.harness)
-    print(f"\n— {args.harness} capability status —")
-    _print_table(verdicts)
+    if not args.json:
+        print(f"\n— {args.harness} capability status —")
+        _print_table(verdicts)
 
-    bad = {Status.PRESENT_BROKEN, Status.ABSENT}
-    if any(v.status in bad for v in verdicts):
-        return 1
-    return 0
+    bad = {Status.PRESENT_BROKEN, Status.ABSENT, Status.UNKNOWN}
+    failed = any(v.status in bad for v in verdicts) or any(
+        result.status == "failed" for result in action_results
+    )
+    if args.json:
+        payload = {
+            "tool": "acb",
+            "harness": args.harness,
+            "user": None,
+            "status": "failed" if failed else "installed",
+            "actions": [
+                {
+                    "kind": result.action.kind,
+                    "path": result.action.target,
+                    "detail": result.detail or result.action.summary,
+                    "status": result.status,
+                }
+                for result in action_results
+            ],
+            "checks": [
+                {
+                    "capability": verdict.capability,
+                    "harness": verdict.harness,
+                    "status": verdict.status.value,
+                    "detail": verdict.detail,
+                }
+                for verdict in verdicts
+            ],
+            "no_op": not plan,
+        }
+        print(json.dumps(payload, indent=2))
+    return 1 if failed else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -492,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="install shims into one harness and verify capabilities (bootstrap)",
     )
     ih.add_argument(
-        "harness", help="harness to provision (e.g. claude, opencode)"
+        "harness", help="harness to provision (claude, opencode, codex, or all)"
     )
     ih.add_argument(
         "-m", "--manifest", default=None,
@@ -502,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true",
         help="show what would be installed without applying"
     )
+    ih.add_argument("--json", action="store_true", help="emit contract-shaped JSON")
     ih.set_defaults(func=_cmd_install_harness)
 
     return parser

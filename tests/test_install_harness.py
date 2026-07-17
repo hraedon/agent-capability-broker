@@ -74,7 +74,7 @@ def test_install_harness_dry_run_writes_nothing(
         rc = main(["install-harness", "opencode", "-m", str(manifest), "--dry-run"])
 
     out = buf.getvalue()
-    assert rc == 1
+    assert rc == 2
     assert "would apply" in out.lower()
     assert not (tmp_path / "oc" / "command" / "cred-svc-bot.md").exists()
 
@@ -106,6 +106,91 @@ def test_install_harness_unknown_harness(
     rc = main(["install-harness", "zsh", "-m", str(manifest)])
     assert rc == 2
     assert "unknown harness" in capsys.readouterr().err.lower()
+
+
+def test_install_harness_codex_is_contract_shaped_unsupported(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(["install-harness", "codex", "--json"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tool"] == "acb"
+    assert payload["harness"] == "codex"
+    assert payload["status"] == "unsupported"
+    assert payload["no_op"] is False
+    assert payload["actions"][0]["kind"] == "unsupported"
+
+
+def test_install_harness_json_reports_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_oc(tmp_path, monkeypatch)
+    monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
+    manifest = _cred_manifest(tmp_path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(
+            ["install-harness", "opencode", "-m", str(manifest), "--json"]
+        )
+
+    assert rc == 0
+    payload = json.loads(buf.getvalue())
+    assert payload["status"] == "installed"
+    assert payload["harness"] == "opencode"
+    assert payload["checks"][0]["status"] == "present_ok"
+
+
+def test_install_harness_supported_json_dry_run_uses_contract_exit_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_oc(tmp_path, monkeypatch)
+    monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
+    manifest = _cred_manifest(tmp_path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(
+            [
+                "install-harness",
+                "opencode",
+                "-m",
+                str(manifest),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert rc == 2
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "acb"
+    assert payload["harness"] == "opencode"
+    assert payload["status"] == "installed"
+    assert payload["no_op"] is False
+    assert payload["actions"]
+
+
+def test_requested_unavailable_adapter_unknown_is_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        'from_env="ACB_TEST_SECRET"\nharnesses=["claude"]\n',
+        encoding="utf-8",
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(["install-harness", "claude", "-m", str(manifest), "--json"])
+
+    assert rc == 1
+    payload = json.loads(buf.getvalue())
+    assert payload["status"] == "failed"
+    assert payload["checks"][0]["status"] == "unknown"
 
 
 def test_install_harness_missing_credential_is_named(
@@ -186,8 +271,70 @@ def test_install_harness_provisioned_harness_dry_run_is_noop(
     with redirect_stdout(buf):
         rc = main(["install-harness", "opencode", "-m", str(manifest), "--dry-run"])
 
-    assert rc == 0
+    assert rc == 2
     assert "nothing to install" in buf.getvalue().lower()
+
+
+def test_install_harness_all_expands_stable_targets_with_contract_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_oc(tmp_path, monkeypatch)
+    monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
+    manifest = _cred_manifest(tmp_path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(
+            [
+                "install-harness",
+                "all",
+                "-m",
+                str(manifest),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert rc == 2
+    payload = json.loads(buf.getvalue())
+    assert payload["tool"] == "acb"
+    assert payload["harness"] == "all"
+    assert payload["status"] == "installed"
+    assert payload["no_op"] is False
+    assert [record["harness"] for record in payload["results"]] == [
+        "claude",
+        "opencode",
+    ]
+    assert all(record["tool"] == "acb" for record in payload["results"])
+    assert all(record["status"] == "installed" for record in payload["results"])
+
+
+def test_install_harness_all_is_noop_only_when_both_records_are_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_oc(tmp_path, monkeypatch)
+    monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
+    manifest = _cred_manifest(tmp_path)
+    with redirect_stdout(io.StringIO()):
+        assert main(["install-harness", "opencode", "-m", str(manifest)]) == 0
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(
+            [
+                "install-harness",
+                "all",
+                "-m",
+                str(manifest),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert rc == 2
+    payload = json.loads(buf.getvalue())
+    assert payload["no_op"] is True
+    assert all(record["no_op"] is True for record in payload["results"])
 
 
 def test_install_harness_emits_provenance_for_manual_actions(

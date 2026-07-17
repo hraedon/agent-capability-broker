@@ -1,6 +1,7 @@
 # Plan 005 — Suite cohesion: capability provisioning as a bootstrap step
 
-**Status:** Landed 2026-07-03 (commit 1eca849)
+**Status:** Landed 2026-07-03 (commit 1eca849); WI-3.1 backend parity
+reopened by Plan 008 after the 2026-07-17 implementation audit.
 **Author:** Claude (Fable 5), from the 2026-07-02 agent-suite deployment review
 **Strategic role:** acb keeps agents at capability + credential parity across
 harnesses. In a suite deployment it is bootstrap step 5 (blueprint §2.3): after
@@ -88,6 +89,12 @@ provisioning step a fresh machine can run. See `/projects/agent-suite-blueprint.
   Linux profile; a credential resolves from each configured backend (gated tests);
   the inject-don't-surface discipline holds on both OSes; existing `ACB_VAULT_ENV`
   still works as a fallback.
+
+**2026-07-17 audit correction:** the shipped `CredProvider` accepts only
+`source = "vault"` and `source = "env"`; `pyproject.toml` exposes only the Vault
+credential extra. The Vault portion landed, but the suite-provider-neutral
+acceptance criterion did not. Plan 008 owns the corrective public-resolver,
+Azure/Windows, multi-field injection, and adversarial proof work.
 
 ## Sequencing & notes
 

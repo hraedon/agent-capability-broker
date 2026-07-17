@@ -17,16 +17,19 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "agent_capability_broker"
 
 # Modules that form the stdlib-only truth path. As provider backends land, their
 # optional-import modules are added to ALLOWED_EXTRA, not here.
-CORE_MODULES = ["model.py", "cli.py", "adapters.py", "providers.py", "provenance.py"]
+CORE_MODULES = [
+    "model.py", "cli.py", "adapters.py", "providers.py", "provenance.py",
+    "secret_sources.py",
+]
 STDLIB_OK = {
-    "__future__", "argparse", "ast", "dataclasses", "enum", "functools", "json",
+    "__future__", "argparse", "ast", "dataclasses", "enum", "functools", "importlib", "json",
     "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing", "datetime",
-    "subprocess",
+    "subprocess", "re", "shutil", "signal", "time", "uuid",
     # platformdirs: config-dir portability (not the truth/verdict path) — sole permitted runtime dep
     "platformdirs",
 }
 # Relative imports of these core modules are allowed (e.g. `from .model import ...`).
-CORE_INTERNAL = {"model", "cli", "adapters", "providers", "provenance"}
+CORE_INTERNAL = {"model", "cli", "adapters", "providers", "provenance", "secret_sources"}
 # Optional-extra modules that must NEVER be imported at module level by the core.
 FORBIDDEN_IN_CORE = {"cred_vault", "hvac"}
 

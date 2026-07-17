@@ -9,8 +9,11 @@
 
 [capability."cred:svc-bot"]
 provider  = "cred"
-vault     = "kv/example/ad/svc-bot"   # a Vault path reference, not a secret
-field     = "password"
+source    = "suite"
+refs      = { username = "vault:kv/example/ad/svc-bot/username", password = "vault:kv/example/ad/svc-bot/password" }
+inject    = { username = "EXAMPLE_USERNAME", password = "EXAMPLE_PASSWORD" }
+trusted_argv = ["/opt/example/bin/directory-check", "--validate"]
+timeout_seconds = 120
 harnesses = ["claude", "opencode"]
 
 [capability."e2e:chromium"]

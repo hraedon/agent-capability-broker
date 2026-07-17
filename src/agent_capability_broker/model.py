@@ -19,7 +19,7 @@ import platformdirs
 # capability names a known provider and lists harnesses; provider-specific keys
 # (vault, engine, backend, ...) are validated by the provider itself.
 KNOWN_PROVIDERS = frozenset({"cred", "e2e"})
-KNOWN_HARNESSES = frozenset({"claude", "opencode", "hermes"})
+KNOWN_HARNESSES = frozenset({"claude", "opencode", "codex", "hermes"})
 
 
 class Status(StrEnum):
