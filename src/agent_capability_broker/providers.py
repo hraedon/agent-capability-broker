@@ -439,7 +439,7 @@ def _terminate_process_tree(
             raise RuntimeError("Windows process-tree termination failed")
     else:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signal.SIGTERM)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
         except ProcessLookupError:
             if process.poll() is None:
                 process.wait(timeout=grace_seconds)
@@ -448,12 +448,12 @@ def _terminate_process_tree(
         while True:
             process.poll()  # reap the direct child as soon as it exits
             try:
-                os.killpg(process.pid, 0)
+                os.killpg(process.pid, 0)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
             except ProcessLookupError:
                 break
             if time.monotonic() >= deadline:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
                 except ProcessLookupError:
                     pass
                 break
@@ -503,7 +503,7 @@ def _run_contained(
         # A qualified child should not leave descendants behind. Kill any
         # process still in the owned session before returning normally.
         try:
-            os.killpg(process.pid, 0)
+            os.killpg(process.pid, 0)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
         except ProcessLookupError:
             pass
         else:
