@@ -6,22 +6,51 @@ capability into a child process). The Vault backend used by `cred.exec` is an
 optional extra imported lazily from `cred_vault`, so this module stays
 stdlib-only.
 
-`inspect` is side-effect-free; `exec` injects a secret into the child's
-environment and never returns it to stdout or the model context.
+`inspect` is side-effect-free; `exec` never emits a secret through
+ACB-controlled output. A suite child inherits stdout/stderr and is constrained
+to an exact manifest-qualified command because it remains in the trust boundary.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import shutil
+import signal
 import subprocess
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 from . import provenance
-from .adapters import ClaudeAdapter, HermesAdapter, OpencodeAdapter
+from .adapters import ClaudeAdapter, CodexAdapter, HermesAdapter, OpencodeAdapter
 from .model import Action, ActionResult, Capability, McpServer, Status, Verdict
+from .secret_sources import (
+    SecretSourceConfigError,
+    SecretSourceError,
+    SecretSourceKind,
+    SecretSourceUnavailable,
+    resolve_suite,
+    source_kind,
+    suite_spec,
+    validate_suite_command,
+)
 
 _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webkit")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RESERVED_INJECT_VARS = frozenset(
+    {
+        "COMSPEC", "HOME", "PATH", "PATHEXT", "PYTHONHOME", "PYTHONPATH",
+        "ACB_CHECKOUT_RECEIPT", "SHELL", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
+    }
+)
+_SUITE_CHILD_ENV_ALLOWLIST = frozenset(
+    {"LANG", "LC_ALL", "SYSTEMROOT", "TEMP", "TMP", "TZ", "WINDIR"}
+)
+_TREE_TERMINATION_GRACE_SECONDS = 2.0
 
 
 class HarnessAdapter(Protocol):
@@ -267,6 +296,221 @@ def _inject_var(field: str, mapping: object) -> str:
     return field.upper()
 
 
+def _injection_plan(
+    cap: Capability, fields: list[str], *, mapping: object | None = None
+) -> dict[str, str]:
+    """Validate field->child-env wiring before any child is launched.
+
+    Existing inherited variables are never silently clobbered. Environment
+    names required for process/runtime operation are refused even if absent.
+    """
+    selected = cap.options.get("inject") if mapping is None else mapping
+    plan: dict[str, str] = {}
+    inherited = {name.upper() for name in os.environ}
+    if "ACB_CHECKOUT_RECEIPT" in inherited:
+        raise SecretSourceConfigError(
+            f"{cap.id}: inherited ACB_CHECKOUT_RECEIPT is refused; nested checkout "
+            "inheritance is not supported"
+        )
+    used: set[str] = set()
+    for field in fields:
+        var = _inject_var(field, selected)
+        if not _ENV_NAME.fullmatch(var):
+            raise SecretSourceConfigError(
+                f"{cap.id}: inject target for field {field!r} is not a valid environment name"
+            )
+        folded = var.upper()
+        if folded in _RESERVED_INJECT_VARS:
+            raise SecretSourceConfigError(
+                f"{cap.id}: inject target {var!r} is reserved for process operation"
+            )
+        if folded in used:
+            raise SecretSourceConfigError(
+                f"{cap.id}: duplicate inject target {var!r}"
+            )
+        if folded in inherited:
+            raise SecretSourceConfigError(
+                f"{cap.id}: inject target {var!r} already exists in the inherited environment"
+            )
+        used.add(folded)
+        plan[field] = var
+    return plan
+
+
+def _suite_child_env(plan: dict[str, str], fields: list[str]) -> dict[str, str]:
+    """Build a minimal environment for the exact suite command.
+
+    The absolute executable path makes PATH unnecessary. Credential field names
+    and inject targets are excluded from inherited state before resolved values
+    are added by the caller.
+    """
+    blocked = {name.upper() for name in plan.values()}
+    blocked.update(field.upper() for field in fields)
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in _SUITE_CHILD_ENV_ALLOWLIST and name.upper() not in blocked
+    }
+
+
+def _checkout_receipt(
+    cap: Capability,
+    field_env: dict[str, str],
+    *,
+    invocation_id: str,
+    timeout_seconds: float,
+) -> str:
+    """Return value-free launch correlation metadata for the qualified child."""
+    issued = datetime.now(UTC)
+    expires = issued + timedelta(seconds=timeout_seconds)
+    issued_text = issued.isoformat().replace("+00:00", "Z")
+    expires_text = expires.isoformat().replace("+00:00", "Z")
+    return json.dumps(
+        {
+            "schema": "acb.checkout-receipt.v1",
+            "invocation_id": invocation_id,
+            "issued_at": issued_text,
+            "expires_at": expires_text,
+            "checkouts": [
+                {
+                    "capability_id": cap.id,
+                    "fields": {field: field_env[field] for field in sorted(field_env)},
+                }
+            ],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _windows_taskkill_path() -> str:
+    """Return a trusted taskkill path or fail closed before secret resolution."""
+    found = shutil.which("taskkill.exe") or shutil.which("taskkill")
+    if found:
+        return str(Path(found).resolve())
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidate = Path(system_root) / "System32" / "taskkill.exe"
+        if candidate.is_file():
+            return str(candidate)
+    raise SecretSourceUnavailable(
+        "source 'suite' is disabled on Windows because taskkill.exe is unavailable"
+    )
+
+
+def _windows_containment_preflight() -> str:
+    if not getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0):
+        raise SecretSourceUnavailable(
+            "source 'suite' is disabled on Windows because process-group creation "
+            "is unavailable"
+        )
+    return _windows_taskkill_path()
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    platform_name: str,
+    taskkill_path: str | None = None,
+    grace_seconds: float = _TREE_TERMINATION_GRACE_SECONDS,
+) -> None:
+    """Terminate and reap the owned process tree without exposing its env."""
+    if platform_name == "nt":
+        if taskkill_path is None:
+            raise RuntimeError("Windows process-tree containment is unavailable")
+        try:
+            completed = subprocess.run(  # noqa: S603 (trusted system executable)
+                [taskkill_path, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=grace_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=grace_seconds)
+            raise RuntimeError("Windows process-tree termination failed") from None
+        if completed.returncode != 0:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=grace_seconds)
+            raise RuntimeError("Windows process-tree termination failed")
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
+        except ProcessLookupError:
+            if process.poll() is None:
+                process.wait(timeout=grace_seconds)
+            return
+        deadline = time.monotonic() + grace_seconds
+        while True:
+            process.poll()  # reap the direct child as soon as it exits
+            try:
+                os.killpg(process.pid, 0)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
+            except ProcessLookupError:
+                break
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(0.05)
+
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=grace_seconds)
+
+
+def _run_contained(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    timeout_seconds: float,
+    taskkill_path: str | None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run an exact command in an owned process group; contain on every interruption."""
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if not creation_flag or taskkill_path is None:
+            raise RuntimeError("Windows process-tree containment is unavailable")
+        process = subprocess.Popen(  # noqa: S603 (exact trusted argv)
+            argv,
+            env=env,
+            creationflags=creation_flag,
+        )
+    else:
+        process = subprocess.Popen(  # noqa: S603 (exact trusted argv)
+            argv,
+            env=env,
+            start_new_session=True,
+        )
+    try:
+        returncode = process.wait(timeout=timeout_seconds)
+    except BaseException:
+        _terminate_process_tree(
+            process,
+            platform_name=os.name,
+            taskkill_path=taskkill_path,
+        )
+        raise
+    if os.name != "nt":
+        # A qualified child should not leave descendants behind. Kill any
+        # process still in the owned session before returning normally.
+        try:
+            os.killpg(process.pid, 0)  # type: ignore[attr-defined, unused-ignore]  # POSIX-only
+        except ProcessLookupError:
+            pass
+        else:
+            _terminate_process_tree(process, platform_name=os.name)
+    return subprocess.CompletedProcess(argv, returncode)
+
+
 def _cred_shim_name(cap: Capability) -> str:
     """The command/skill shim that surfaces `acb exec <cap>` to a harness.
 
@@ -307,42 +551,62 @@ def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path)
     """
     desc = (
         f"Run a command with the {cap.id} credential injected by acb "
-        f"(inject-don't-surface — the secret reaches the child's environment, never "
-        f"stdout or your context). Use when a tool needs {cap.id}."
+        f"(ACB never prints the value; the manifest-qualified child is responsible "
+        f"for safe output). Use when a tool needs {cap.id}."
     )
     ve = str(vault_env)
+    if source_kind(cap) is SecretSourceKind.SUITE:
+        unix_command = f"acb exec {cap.id} -- <exact options.trusted_argv>"
+        powershell_command = unix_command
+        cmd_command = unix_command
+        source_note = (
+            "The suite resolver selects the configured backend at execution time; "
+            "the shim contains only the capability id and no secret reference."
+        )
+    else:
+        unix_command = f"ACB_VAULT_ENV={ve} acb exec {cap.id} -- <command> [args...]"
+        powershell_command = (
+            f'$env:ACB_VAULT_ENV="{ve}"; acb exec {cap.id} -- <command> [args...]'
+        )
+        cmd_command = (
+            f'set "ACB_VAULT_ENV={ve}"&& acb exec {cap.id} -- <command> [args...]'
+        )
+        source_note = (
+            "`ACB_VAULT_ENV` points acb at this harness's Vault AppRole "
+            "(distinct per harness)."
+        )
     body = f"""# {shim} — broker {cap.id}
 
 `{cap.id}` is brokered by **agent-capability-broker**; it is not stored in this
 harness. To run a tool with it, shell out to `acb exec` — the credential is
-injected into the child process's environment and **never** printed or returned
-to your context.
+injected into the child process's environment. ACB does not print or return it,
+but the child inherits stdout/stderr and must be the exact manifest-qualified
+command; do not invoke a shell, interpreter, or unreviewed wrapper.
 
 **Linux / macOS:**
 
 ```
-ACB_VAULT_ENV={ve} acb exec {cap.id} -- <command> [args...]
+{unix_command}
 ```
 
 **Windows (PowerShell):**
 
 ```
-$env:ACB_VAULT_ENV="{ve}"; acb exec {cap.id} -- <command> [args...]
+{powershell_command}
 ```
 
 **Windows (cmd):**
 
 ```
-set "ACB_VAULT_ENV={ve}"&& acb exec {cap.id} -- <command> [args...]
+{cmd_command}
 ```
 
-`ACB_VAULT_ENV` points acb at this harness's Vault AppRole (distinct per
-harness). Do not read or echo the secret. `acb doctor` reports whether this
+{source_note} Do not read or echo the secret. `acb doctor` reports whether this
 capability is present and the broker reachable; `acb reconcile` (re)renders this shim.
 `acb install-harness {harness}` is the bootstrap step that renders all shims for
 this harness at once.
 """
-    if harness in ("claude", "hermes"):
+    if harness in ("claude", "hermes", "codex"):
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
     else:
         front = f'---\ndescription: "{desc}"\n---\n\n'
@@ -350,14 +614,14 @@ this harness at once.
 
 
 class CredProvider:
-    """Vault-backed AD/service-account creds.
+    """Inject-only AD/service-account credentials from closed source kinds.
 
     Discoverability has two axes (Plan 004): a credential is *discoverable* in a
     harness iff that harness exposes a command/skill shim surfacing `acb exec
-    cred:<name>` (the ABSENT axis), and *working* iff the broker is reachable via
-    a read-only token self-lookup (the PRESENT_OK vs PRESENT_BROKEN axis). The
-    Vault client is the optional [cred] extra; absent it (or absent Vault env),
-    reachability degrades to UNKNOWN with a reason — never a crash."""
+    cred:<name>` (the ABSENT axis), and *working* iff the selected source can be
+    validated without reading a value (the PRESENT_OK/PRESENT_BROKEN/UNKNOWN
+    axis). Backend clients are optional lazy imports; absence degrades to an
+    actionable UNKNOWN, never a crash."""
 
     name = "cred"
 
@@ -370,14 +634,27 @@ class CredProvider:
         `vault_env` pins the probe to the capability's declared access plane (the
         same `.env` the shim embeds) so multi-plane estates are checked per-plane,
         not all through one shell `ACB_VAULT_ENV` (WI-008)."""
-        source = str(cap.options.get("source", "vault"))
-        if source == "env":
+        try:
+            source = source_kind(cap)
+        except SecretSourceConfigError as exc:
+            return Status.PRESENT_BROKEN, str(exc)
+        if source is SecretSourceKind.ENV:
             var = cap.options.get("from_env")
             if isinstance(var, str) and var in os.environ:
                 return Status.PRESENT_OK, f"source 'env': ${var} is set"
             return Status.PRESENT_BROKEN, f"source 'env': ${var or '?'} is not set"
-        if source != "vault":
-            return Status.UNKNOWN, f"unknown cred source {source!r}"
+        if source is SecretSourceKind.SUITE:
+            try:
+                spec = suite_spec(cap, require_available=True)
+            except SecretSourceConfigError as exc:
+                return Status.PRESENT_BROKEN, str(exc)
+            except SecretSourceUnavailable as exc:
+                return Status.UNKNOWN, str(exc)
+            providers = sorted(set(spec.providers.values()))
+            return (
+                Status.UNKNOWN,
+                f"suite provider(s) {providers!r} available; values intentionally unproven",
+            )
         try:
             from . import cred_vault  # lazy: keeps the [cred] extra optional
 
@@ -430,7 +707,7 @@ class CredProvider:
         content = str(action.payload.get("content", ""))
         if isinstance(adapter, OpencodeAdapter):
             res = adapter.write_command_shim(action.target, content)
-        elif isinstance(adapter, ClaudeAdapter | HermesAdapter):
+        elif isinstance(adapter, ClaudeAdapter | HermesAdapter | CodexAdapter):
             res = adapter.write_skill_shim(action.target, content)
         else:
             return ActionResult(action, "skipped", "shim rendering not supported for this harness")
@@ -443,11 +720,13 @@ class CredProvider:
         """Return the capability's secret field(s). Source-pluggable.
 
         `vault` (default) brokers via Vault (optional [cred] extra); `env` reads
-        an already-present environment variable (lightweight / testing). Either
-        way the value is returned only to `exec`, never to the model context.
+        an already-present environment variable (lightweight/testing); and
+        `suite` uses the optional public Regista facade. Values return only to
+        `exec`; ACB does not place them in model-visible output. The qualified
+        suite child remains responsible for its own stdout/stderr.
         """
-        source = str(cap.options.get("source", "vault"))
-        if source == "env":
+        source = source_kind(cap)
+        if source is SecretSourceKind.ENV:
             var = cap.options.get("from_env")
             if not isinstance(var, str) or not var:
                 raise RuntimeError(f"{cap.id}: source 'env' requires options.from_env")
@@ -455,42 +734,149 @@ class CredProvider:
                 raise RuntimeError(f"{cap.id}: env var ${var} is not set")
             field = str(cap.options.get("field", "password"))
             return {field: os.environ[var]}
-        if source == "vault":
+        if source is SecretSourceKind.VAULT:
             from . import cred_vault  # lazy: keeps the [cred] extra optional
 
             return cred_vault.resolve(cap)
-        raise RuntimeError(f"{cap.id}: unknown cred source {source!r}")
+        return resolve_suite(cap)
 
     def exec(self, cap: Capability, argv: list[str]) -> int:
         """Run `argv` with the resolved secret(s) injected into its environment.
 
-        Inject-don't-surface: the secret is placed only in the child's env (per
-        `options.inject`, else the upper-cased field name); it is never written
-        to stdout, the provenance event, or the model context. Returns the
-        child's exit code.
+        ACB itself never writes a value to argv, output, errors, receipts, or
+        provenance. A suite child receives the value and inherits stdout/stderr,
+        so it must exactly match the manifest-qualified command and remains part
+        of the trust boundary. Returns the child's exit code.
         """
         if not argv:
             raise ValueError("exec requires a command after '--'")
 
-        fields = self._resolve(cap)
-        mapping = cap.options.get("inject")
-        child_env = os.environ.copy()
-        injected: list[str] = []
-        for field, value in fields.items():
-            var = _inject_var(field, mapping)
-            child_env[var] = value
-            injected.append(var)
+        source = source_kind(cap)
+        if source is not SecretSourceKind.SUITE:
+            # Legacy Vault/env sources keep their established injection,
+            # environment, timeout, and single-provenance behavior.
+            legacy_fields = self._resolve(cap)
+            mapping = cap.options.get("inject")
+            legacy_plan = {
+                field: _inject_var(field, mapping) for field in legacy_fields
+            }
+            legacy_env = os.environ.copy()
+            injected: list[str] = []
+            for field, value in legacy_fields.items():
+                var = legacy_plan[field]
+                legacy_env[var] = value
+                injected.append(var)
+            action = Action(
+                cap.id,
+                "local",
+                "exec",
+                cap.id,
+                f"injected {sorted(injected)} into child '{argv[0]}'",
+            )
+            legacy_result = subprocess.run(argv, env=legacy_env)  # noqa: S603
+            provenance.emit(
+                ActionResult(action, "applied", f"child exited {legacy_result.returncode}")
+            )
+            return legacy_result.returncode
 
-        result = subprocess.run(argv, env=child_env)  # noqa: S603 (intentional exec)
-
-        # Provenance records the act and which env vars were set — never a value.
+        # Suite command, manifest, collision, and receipt-name validation all
+        # happen before a value is resolved.
+        validate_suite_command(cap, argv)
+        taskkill_path = _windows_containment_preflight() if os.name == "nt" else None
+        suite = suite_spec(cap, require_available=False)
+        plan = _injection_plan(cap, list(suite.refs), mapping=suite.inject)
+        invocation_id = uuid.uuid4().hex
         action = Action(
-            cap.id, "local", "exec", cap.id,
-            f"injected {sorted(injected)} into child '{argv[0]}'",
+            cap.id,
+            "local",
+            "exec",
+            cap.id,
+            f"qualified child '{argv[0]}' will receive {sorted(plan.values())} "
+            f"(invocation {invocation_id})",
         )
         provenance.emit(
-            ActionResult(action, "applied", f"child exited {result.returncode}")
+            ActionResult(action, "started", "qualified credential resolution starting")
         )
+        terminal = ActionResult(action, "failed", "qualified invocation interrupted")
+        fields: dict[str, str] = {}
+        child_env: dict[str, str] = {}
+        result: subprocess.CompletedProcess[bytes] | None = None
+        pending_error: RuntimeError | None = None
+        try:
+            try:
+                fields = resolve_suite(cap, suite)
+            except SecretSourceError:
+                terminal = ActionResult(
+                    action,
+                    "failed",
+                    "qualified credential resolution failed",
+                )
+                raise
+
+            child_env = _suite_child_env(plan, list(fields))
+            for field, value in fields.items():
+                child_env[plan[field]] = value
+            child_env["ACB_CHECKOUT_RECEIPT"] = _checkout_receipt(
+                cap,
+                plan,
+                invocation_id=invocation_id,
+                timeout_seconds=suite.timeout_seconds,
+            )
+            try:
+                result = _run_contained(
+                    argv,
+                    env=child_env,
+                    timeout_seconds=suite.timeout_seconds,
+                    taskkill_path=taskkill_path,
+                )
+            except subprocess.TimeoutExpired:
+                terminal = ActionResult(
+                    action,
+                    "failed",
+                    f"qualified child timed out after {suite.timeout_seconds:g} seconds",
+                )
+                pending_error = RuntimeError(
+                    f"{cap.id}: qualified child timed out after "
+                    f"{suite.timeout_seconds:g} seconds"
+                )
+            except OSError as exc:
+                error_kind = type(exc).__name__
+                terminal = ActionResult(
+                    action,
+                    "failed",
+                    f"qualified child launch failed ({error_kind})",
+                )
+                pending_error = RuntimeError(
+                    f"{cap.id}: qualified child launch failed ({error_kind})"
+                )
+            except RuntimeError:
+                terminal = ActionResult(
+                    action,
+                    "failed",
+                    "qualified child process-tree containment failed",
+                )
+                pending_error = RuntimeError(
+                    f"{cap.id}: qualified child process-tree containment failed"
+                )
+            else:
+                terminal = ActionResult(
+                    action,
+                    "applied" if result.returncode == 0 else "failed",
+                    f"qualified child exited {result.returncode}",
+                )
+        finally:
+            # Best-effort lifetime reduction. Python strings and process memory
+            # cannot be cryptographically erased; this only clears live mappings.
+            for field in fields:
+                fields[field] = ""
+            for var in plan.values():
+                child_env[var] = ""
+            child_env["ACB_CHECKOUT_RECEIPT"] = ""
+            provenance.emit(terminal)
+
+        if pending_error is not None:
+            raise pending_error
+        assert result is not None
         return result.returncode
 
 
@@ -506,4 +892,5 @@ def adapters() -> dict[str, HarnessAdapter]:
         "claude": ClaudeAdapter(),
         "opencode": OpencodeAdapter(),
         "hermes": HermesAdapter(),
+        "codex": CodexAdapter(),
     }

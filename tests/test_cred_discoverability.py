@@ -167,6 +167,21 @@ def test_render_shim_includes_cross_platform_invocation() -> None:
         assert "install-harness" in text           # bootstrap mention
 
 
+def test_render_suite_shim_contains_no_backend_ref_or_vault_env() -> None:
+    cap = Capability(
+        "cred:lab-control", "cred", ("opencode",),
+        {
+            "source": "suite",
+            "refs": {"password": "vault:kv/example/lab/password"},
+            "inject": {"password": "LAB_PASSWORD"},
+        },
+    )
+    text = _render_cred_shim(cap, "opencode", "cred-lab-control", Path("ignored.env"))
+    assert "acb exec cred:lab-control" in text
+    assert "ACB_VAULT_ENV" not in text
+    assert "kv/example" not in text
+
+
 # --- reconcile: render the missing shim ------------------------------------
 
 def test_plan_absent_renders_add_cred_shim(tmp_path: Path) -> None:

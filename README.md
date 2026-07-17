@@ -54,7 +54,12 @@ and reconciles reality to it.
   `e2e` (Playwright/browser provisioning, local or remote backend) are the first
   two. Adding a provider is the extension point.
 - **Harness adapters** that read and render each harness's wiring (Claude Code
-  `settings.json` + skills; opencode `opencode.json` MCP/commands).
+  `settings.json` + skills; opencode `opencode.json` MCP/commands). `codex` is
+  recognized by the closed suite contract but currently returns explicit,
+  non-zero `unsupported` from `install-harness` until Plan 007 lands. Hermes
+  remains an explicit component-private target. Direct `install-harness all`
+  expands only the currently supported public set (Claude + OpenCode); Codex is
+  promoted atomically after its adapter and conformance proof land.
 - `doctor` (read-only parity report), `reconcile` (generate wiring, dry-run by
   default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
   (bootstrap: provision one harness from the manifest + verify), `shims`
@@ -62,8 +67,9 @@ and reconciles reality to it.
 - **Provenance emission** of every acting verb to regista / agent-provenance.
 
 **Out / non-goals:**
-- **Not a secret store.** Vault remains the credential backend; `acb`'s `cred`
-  provider is a *client*, never a vault. No secrets at rest in `acb`'s own state.
+- **Not a secret store.** Vault, Azure Key Vault, or Windows-native custody
+  remains the credential backend; `acb`'s `cred` provider is a *client*, never
+  a vault. No secrets are stored at rest in `acb`'s own state.
 - **Not the browser runtime.** A remote Playwright/browser endpoint (k8s or
   otherwise) is a *backend* the `e2e` provider targets; `acb` does not host it.
 - **Not an MCP-first design.** A per-harness MCP is exactly the fragility that
@@ -87,17 +93,34 @@ and reconciles reality to it.
   **dry-run by default**, backs up before writing, never clobbers an existing
   secret, and emits provenance on every action.
 - **Inject, don't surface.** `acb exec cred:svc-bot -- ./script` injects the
-  secret into the child process and never returns it to the model's context.
-  `get` is an escape hatch, not the default.
+  secret into the child process. ACB never emits the value itself, but the child
+  inherits stdout/stderr and can emit or transform it. Suite manifests therefore
+  require an exact absolute `trusted_argv`, minimal environment, and bounded
+  process-tree timeout; the purpose-built child remains part of the qualified
+  trust boundary. Timeout/interruption terminates the owned POSIX session or
+  Windows process tree; Windows fails closed if its containment tools are absent.
+- **Provider-neutral suite refs.** `source = "suite"` maps explicit `vault:`,
+  `azure:`, or `windows:` refs to named child environment variables through
+  the optional `regista.secrets` facade. ACB refuses inherited-variable
+  collisions and validates provider availability during doctor without reading
+  a value. Azure and Windows support here reflects adapter wiring only; live
+  backend/OS conformance remains separately gated validation.
+- **Value-free checkout binding.** Suite children receive an
+  `ACB_CHECKOUT_RECEIPT` JSON envelope with invocation/timing metadata and a
+  one-entry extensible `checkouts` list. It contains capability/field names but
+  no refs or values. It is correlation metadata, not a cryptographic token;
+  nested inheritance and multi-capability composition remain unsupported.
+  The receipt maps each semantic field to its injected environment name.
 - **Deterministic core, no AI in the truth path.** `doctor`'s verdicts are
   computed, not narrated. Any narration layer imports the core, never the reverse
   (enforced by an architecture test).
 
 ## Boundary with sibling tools
 
-- **Vault / the self-hosted AppRoles** are the credential *backend*; `acb`'s `cred`
-  provider authenticates to them (k8s auth → AppRole `.env` → `VAULT_TOKEN`) and
-  brokers access. `acb` replaces the hand-placed `.env` *distribution*, not Vault.
+- **Secret backends** retain custody. The legacy Vault path authenticates through
+  k8s auth → AppRole `.env` → `VAULT_TOKEN`; `source = "suite"` delegates explicit
+  provider refs to Regista's public resolver. ACB brokers credential use
+  without storing any value itself.
 - **regista / agent-provenance** receive `acb`'s provenance events; a brokered
   capability check-out becomes an attestable agent action. `acb` does not store
   state there in its truth path.

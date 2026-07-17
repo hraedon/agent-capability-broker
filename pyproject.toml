@@ -38,6 +38,11 @@ dev = [
 cred = [
     "hvac>=2.1,<3",
 ]
+# Provider-neutral suite resolver. Imported lazily by source="suite" only;
+# doctor and the existing Vault/environment paths work without it.
+suite-secrets = [
+    "regista>=0.5.1,<0.6",
+]
 # Hermes config is YAML, parsed by pyyaml. The core never imports this; on hosts
 # without Hermes the read path degrades to empty (a warning, not a crash) and the
 # act path (`add_mcp_server`) raises a clear install hint.

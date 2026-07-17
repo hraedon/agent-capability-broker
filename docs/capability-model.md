@@ -46,8 +46,11 @@ gitignored — it is a config, not an example.
 # Example — placeholders only; never commit a real one.
 [capability."cred:svc-bot"]
 provider  = "cred"
-vault     = "kv/example/ad/svc-bot"      # path, not a secret; example value
-field     = "password"
+source    = "suite"
+refs      = { username = "vault:kv/example/ad/svc-bot/username", password = "vault:kv/example/ad/svc-bot/password" }
+inject    = { username = "EXAMPLE_USERNAME", password = "EXAMPLE_PASSWORD" }
+trusted_argv = ["/opt/example/bin/directory-check", "--validate"]
+timeout_seconds = 120
 harnesses = ["claude", "opencode"]
 
 [capability."e2e:chromium"]
@@ -108,19 +111,27 @@ exec(cap, argv)                       -> int           # injects secret; emits p
   a provenance event.
 - `exec` resolves the capability (e.g. fetches a credential, locates a browser
   endpoint), launches `argv` with it injected into the child's environment /a
-  short-lived temp file, and **never returns the secret to the caller's stdout or
-  the model's context**.
+  short-lived temp file, and never writes the secret through ACB-controlled
+  output. The suite child inherits stdout/stderr and remains a qualified trust
+  boundary as described below.
 
 First two providers:
 
-- **`cred`** — Vault-backed AD/service-account credentials. Auth resolves inside
+- **`cred`** — AD/service-account credentials from the legacy Vault source or
+  provider-neutral `source = "suite"`. Suite refs are explicit `vault:`,
+  `azure:`, or `windows:` references resolved through the optional public
+  `regista.secrets` facade. Doctor validates wiring and provider availability
+  but never resolves a value. Suite execution additionally requires an absolute
+  `trusted_argv` whose complete argv must match exactly before resolution. ACB
+  supplies a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
   the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`. Because cred
   has no per-harness config artifact, discoverability has **two axes** (Plan 004):
   a cred is `ABSENT` in a harness until that harness exposes a command/skill shim
   surfacing `acb exec cred:<name>`, and once present, a read-only **broker
   reachability** check (token self-lookup — not a secret read, which would be a
   use) decides `PRESENT_OK` vs `PRESENT_BROKEN`. `plan_reconcile` renders the
-  missing shim. The HTTP/Vault client is an optional extra; the core never imports it.
+  missing shim. The HTTP/Vault client and suite resolver are lazy optional
+  extras; the core imports neither at module load.
 - **`e2e`** — Playwright/browser capability. `inspect` checks the browser binary
   or remote endpoint is reachable and launchable headless. `plan_reconcile` for
   an `ABSENT`/`PRESENT_BROKEN` Chromium might be: install browser binaries, or
@@ -128,6 +139,19 @@ First two providers:
   at an already-provisioned browser/endpoint.
 
 ## 6. Harness adapters
+
+The closed manifest set recognizes `claude`, `opencode`, `codex`, and the
+component-private `hermes` target. The Codex adapter (`CodexAdapter`, Plan 008
+WI-3.1) is implemented for the cred provider: `acb install-harness codex`
+renders `cred:<id>` discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md`
+(Codex's own `SKILL.md` format), create-only and preserving the user's config
+and existing skills (including the reserved `.system` tree). The Codex e2e/MCP
+write path is honestly `unsupported` (a named skip), not a false green.
+`acb install-harness all` still expands only to the currently supported public
+adapters, Claude and OpenCode: Codex joins `all` atomically after its live
+interop proof (Plan 007 WI-3.1), not merely because its adapter exists. A
+supported `--dry-run` exits 2 and keeps the same result schema; the aggregate is
+a no-op only when both concrete records are installed no-ops.
 
 An adapter encapsulates one harness's config format and capability surface:
 
@@ -142,6 +166,10 @@ exposed_tools()      -> set[str]              # what the harness currently adver
   global skills directory.
 - **opencode** — reads `~/.config/opencode/opencode.json` (`mcp` blocks,
   `command` shims).
+- **codex** — reads `$CODEX_HOME/config.toml` (`[mcp_servers.*]`, via stdlib
+  `tomllib`) and `$CODEX_HOME/skills/<name>/SKILL.md` skills; writes cred
+  discovery skills only (create-only), never Codex config, auth, or the
+  `.system` skill tree.
 
 The MCP capability layer is read via `mcp_servers()`; `exposed_tools()`'s concrete
 realization is `command_shims()` — the command/skill shim surface (opencode
@@ -159,7 +187,7 @@ value already present.
 |---|---|---|
 | Verbs | `doctor`, `inspect` | `reconcile --apply`, `exec`, `apply` |
 | Mutates config? | Never | Yes (backup-first, idempotent, no secret clobber) |
-| Touches secrets? | Never surfaces them; reachability checks only | Injects into child; never to stdout/model context |
+| Touches secrets? | Never surfaces them; reachability checks only | Injects into a qualified child; ACB does not emit values, but the child-output boundary applies |
 | Determinism | Fully deterministic, no model calls | Deterministic actions; provenance-emitting |
 | Default | — | **Dry-run** (`--apply` required to mutate) |
 
@@ -167,6 +195,48 @@ This boundary is the project's core safety property. The read path is as safe as
 any lens sibling; the act path is where `acb` earns its "not read-only"
 asterisk, and every rule on it exists to keep a brokered secret or a generated
 config from doing harm or leaking.
+
+### Suite child-output and checkout-receipt boundary
+
+`source = "suite"` does not make an arbitrary child safe. ACB never writes the
+resolved value to its own stdout/stderr, argv, error, or provenance, but the
+qualified child receives it and inherits the operator's stdout/stderr. That
+child can print, transform, or exfiltrate the value. Therefore the complete,
+absolute `trusted_argv` is a deployment qualification boundary: use a reviewed
+purpose-built executable, not a shell, interpreter, or general wrapper. Exact
+value capture/redaction would be defense in depth only and cannot stop a
+malicious transformation.
+
+The qualified child receives `ACB_CHECKOUT_RECEIPT`, compact JSON with this
+value-free shape:
+
+```json
+{
+  "schema": "acb.checkout-receipt.v1",
+  "invocation_id": "uuid",
+  "issued_at": "UTC ISO-8601",
+  "expires_at": "UTC ISO-8601",
+  "checkouts": [
+    {
+      "capability_id": "cred:svc-bot",
+      "fields": {"password": "EXAMPLE_PASSWORD", "username": "EXAMPLE_USERNAME"}
+    }
+  ]
+}
+```
+
+This is parent-launch binding and provenance correlation metadata, not a
+cryptographic authorization token. The list is envelope-extensible, but this
+slice emits one checkout. Nested receipt inheritance and atomic multi-capability
+checkout/composition are refused and remain live work.
+
+The bounded runner owns a new POSIX session or Windows process group. On timeout
+or interruption it terminates and reaps the tree: POSIX `killpg` TERM followed
+by bounded KILL, or Windows `taskkill /PID /T /F` with direct-kill fallback.
+Windows suite execution is disabled before resolution when `taskkill.exe` or the
+process-group creation flag is unavailable. A deliberately detaching or
+privilege-escaping child remains outside what stdlib containment can prove and
+is another reason the exact child must be qualified.
 
 ## 8. Provenance
 
