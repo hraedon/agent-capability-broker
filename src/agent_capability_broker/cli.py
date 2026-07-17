@@ -465,32 +465,6 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
         )
         return 2
 
-    if args.harness == "codex":
-        unsupported_detail = (
-            "Codex adapter is not implemented; no capability wiring "
-            "was changed (Plan 007)"
-        )
-        payload = {
-            "tool": "acb",
-            "harness": "codex",
-            "user": None,
-            "status": "unsupported",
-            "actions": [
-                {
-                    "kind": "unsupported",
-                    "path": "",
-                    "detail": unsupported_detail,
-                }
-            ],
-            "no_op": False,
-        }
-        if args.json:
-            print(json.dumps(payload, indent=2))
-        else:
-            print("codex: unsupported (not wired)")
-            print(f"  {unsupported_detail}")
-        return 1
-
     try:
         manifest_path = resolve_manifest(args.manifest)
     except ManifestError as exc:

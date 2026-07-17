@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import provenance
-from .adapters import ClaudeAdapter, HermesAdapter, OpencodeAdapter
+from .adapters import ClaudeAdapter, CodexAdapter, HermesAdapter, OpencodeAdapter
 from .model import Action, ActionResult, Capability, McpServer, Status, Verdict
 from .secret_sources import (
     SecretSourceConfigError,
@@ -606,7 +606,7 @@ capability is present and the broker reachable; `acb reconcile` (re)renders this
 `acb install-harness {harness}` is the bootstrap step that renders all shims for
 this harness at once.
 """
-    if harness in ("claude", "hermes"):
+    if harness in ("claude", "hermes", "codex"):
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
     else:
         front = f'---\ndescription: "{desc}"\n---\n\n'
@@ -707,7 +707,7 @@ class CredProvider:
         content = str(action.payload.get("content", ""))
         if isinstance(adapter, OpencodeAdapter):
             res = adapter.write_command_shim(action.target, content)
-        elif isinstance(adapter, ClaudeAdapter | HermesAdapter):
+        elif isinstance(adapter, ClaudeAdapter | HermesAdapter | CodexAdapter):
             res = adapter.write_skill_shim(action.target, content)
         else:
             return ActionResult(action, "skipped", "shim rendering not supported for this harness")
@@ -892,4 +892,5 @@ def adapters() -> dict[str, HarnessAdapter]:
         "claude": ClaudeAdapter(),
         "opencode": OpencodeAdapter(),
         "hermes": HermesAdapter(),
+        "codex": CodexAdapter(),
     }

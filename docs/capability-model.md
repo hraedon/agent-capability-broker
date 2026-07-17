@@ -141,14 +141,17 @@ First two providers:
 ## 6. Harness adapters
 
 The closed manifest set recognizes `claude`, `opencode`, `codex`, and the
-component-private `hermes` target. Codex manifest entries are valid, but its
-adapter is not implemented yet: `acb install-harness codex` returns a
-contract-shaped `unsupported` result with `no_op: false` and exits non-zero.
-This prevents transitional recognition from reading as installed parity.
-`acb install-harness all` expands to the currently supported public adapters,
-Claude and OpenCode. A supported `--dry-run` exits 2 and keeps the same result
-schema; the aggregate is a no-op only when both concrete records are installed
-no-ops. Codex joins `all` atomically after its adapter and conformance proof.
+component-private `hermes` target. The Codex adapter (`CodexAdapter`, Plan 008
+WI-3.1) is implemented for the cred provider: `acb install-harness codex`
+renders `cred:<id>` discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md`
+(Codex's own `SKILL.md` format), create-only and preserving the user's config
+and existing skills (including the reserved `.system` tree). The Codex e2e/MCP
+write path is honestly `unsupported` (a named skip), not a false green.
+`acb install-harness all` still expands only to the currently supported public
+adapters, Claude and OpenCode: Codex joins `all` atomically after its live
+interop proof (Plan 007 WI-3.1), not merely because its adapter exists. A
+supported `--dry-run` exits 2 and keeps the same result schema; the aggregate is
+a no-op only when both concrete records are installed no-ops.
 
 An adapter encapsulates one harness's config format and capability surface:
 
@@ -163,6 +166,10 @@ exposed_tools()      -> set[str]              # what the harness currently adver
   global skills directory.
 - **opencode** — reads `~/.config/opencode/opencode.json` (`mcp` blocks,
   `command` shims).
+- **codex** — reads `$CODEX_HOME/config.toml` (`[mcp_servers.*]`, via stdlib
+  `tomllib`) and `$CODEX_HOME/skills/<name>/SKILL.md` skills; writes cred
+  discovery skills only (create-only), never Codex config, auth, or the
+  `.system` skill tree.
 
 The MCP capability layer is read via `mcp_servers()`; `exposed_tools()`'s concrete
 realization is `command_shims()` — the command/skill shim surface (opencode

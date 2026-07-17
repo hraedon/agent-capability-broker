@@ -98,14 +98,19 @@ Each adapter reads and renders one harness's wiring:
 Adapters must treat existing configs as **secret-bearing**: read for diffing,
 write only via the gated act path (backup-first, no secret clobber).
 
-`codex` is part of the closed suite harness set, but `install-harness codex`
-currently returns an explicit non-zero `unsupported` result until Plan 007
-lands. Hermes remains a component-private explicit target and is not part of
-the suite's stable `all` expansion.
+`codex` is part of the closed suite harness set. `install-harness codex` renders
+cred discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md` (Codex's own
+skill format), backup-first and create-only — the `CodexAdapter` (Plan 008
+WI-3.1). It stays **out of the stable `all` expansion** (Decision 2) until the
+live interop proof (Plan 007 WI-3.1) lands; `CODEX_HOME`/`ACB_CODEX_HOME` select
+the config root. Codex MCP writes (e2e provider) remain an honest `unsupported`
+skip. Hermes remains a component-private explicit target and is not part of the
+suite's stable `all` expansion.
 
 Beyond the MCP capability layer, each adapter also reads its **command/skill shim
-surface** (`command_shims()`): opencode `command/<name>.md` stems and Claude
-`skills/<name>/SKILL.md` dirs. `acb shims` reports that surface's parity across
+surface** (`command_shims()`): opencode `command/<name>.md` stems and Claude/Codex
+`skills/<name>/SKILL.md` dirs (Codex's reserved `.system` tree is never
+enumerated or written). `acb shims` reports that surface's parity across
 harnesses (read-only, exits non-zero on a gap) — see `plans/003-shim-surface.md`.
 
 ## Boundary with sibling tools

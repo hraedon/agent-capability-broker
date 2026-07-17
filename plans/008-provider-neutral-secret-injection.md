@@ -1,8 +1,9 @@
 # Plan 008 — Provider-neutral suite secret injection
 
-**Status:** In progress 2026-07-17. Public Regista facade and the synthetic,
-fail-closed `source = "suite"` injection slice are implemented; live backend,
-Codex, and evidence-lab conformance remain open.  
+**Status:** In progress 2026-07-17. Public Regista facade, the synthetic,
+fail-closed `source = "suite"` injection slice, and the **Codex cred-shim adapter
+(WI-3.1 adapter half)** are implemented; live backend conformance (WI-1.3), the
+live Codex interop proof, and the Windows evidence-lab proof (WI-3.2) remain open.  
 **Author:** GPT-5.6 Sol, from the Windows evidence-lab and Codex readiness audit.  
 **Strategic role:** Let ACB inject credentials from the agent-suite secret
 backend contract without becoming a secret store, printing a resolved value, or
@@ -222,6 +223,29 @@ entry that invokes `acb exec cred:<id> -- <command>`. It must not offer a
 
 **AC:** install, rerun, conflict, trust, disable, and uninstall behavior passes
 against an isolated `CODEX_HOME`; user skills/plugins/config are preserved.
+
+**Landed 2026-07-17 (adapter half).** `CodexAdapter` (`src/…/adapters.py`)
+renders cred discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md` in
+Codex's own `SKILL.md` format (verified byte-shape-identical to Codex's bundled
+`.system` skills), create-only and backup-first. `install-harness codex` now
+flows the normal plan/apply/verify path (the hard-coded `unsupported` block is
+gone); the shim carries only the `acb exec cred:<id> -- <cmd>` inject-don't-
+surface pattern — no get/print/inspect/clipboard, no secret value (canary test).
+`CODEX_HOME`/`ACB_CODEX_HOME` select the root; the reserved `.system` tree is
+never enumerated or written. Verified against an isolated `CODEX_HOME` via the
+real CLI **and** unit tests (install, dry-run, rerun-no-op, hand-edited-shim
+conflict → preserved, user config/skills preserved, `all` excludes codex). Codex
+stays out of the stable `all` expansion until WI-3.2's live proof.
+
+Remaining for WI-3.1: (a) *live* Codex in-session discovery/invocation of the
+shim is Plan 007 WI-3.1's billable interop proof, not asserted here; (b) the
+Codex **plugin/marketplace** composition (`.codex-plugin/plugin.json` +
+`codex plugin add`) is agent-suite's suite-level distribution concern (Plan 007
+WI-0.1), not acb's — acb owns the direct-installer skill surface; (c) *trust*
+does not apply to skills (only hooks/MCP need `/hooks` trust) and generic
+*uninstall/disable* is a pre-existing cross-harness gap (acb has no uninstall for
+claude/opencode either), so it is deferred as a suite-wide WI, not a codex-only
+one — recorded rather than faked green.
 
 ### WI-3.2 — Windows evidence-lab proof
 

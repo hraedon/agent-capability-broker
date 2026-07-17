@@ -335,6 +335,101 @@ class HermesAdapter:
         return _create_file(self.shims_path / name / "SKILL.md", content)
 
 
+class CodexAdapter:
+    """Codex CLI: ``$CODEX_HOME/config.toml`` -> ``[mcp_servers.*]``; skills at
+    ``$CODEX_HOME/skills/<name>/SKILL.md``.
+
+    Codex uses the same ``SKILL.md`` skill format as Claude Code (YAML
+    frontmatter with ``name:``), discovered under ``skills/``.  Codex's own
+    bundled skills live in a reserved ``skills/.system/`` tree that acb never
+    enumerates or writes.  Config is TOML, read-only here (``mcp_servers``),
+    parsed with the stdlib ``tomllib``.
+
+    ``CODEX_HOME`` (Codex's own env var) selects the config root; ``ACB_CODEX_HOME``
+    overrides it for tests/isolation.  This is the component-owned *direct
+    installer* surface (Plan 007): the operator-facing suite path may instead
+    compose these skills into a Codex plugin/marketplace snapshot, which is
+    agent-suite's concern, not acb's.
+    """
+
+    name = "codex"
+
+    def __init__(self, codex_home: Path | None = None) -> None:
+        env = os.environ.get("ACB_CODEX_HOME") or os.environ.get("CODEX_HOME")
+        self.codex_home = codex_home or (Path(env) if env else Path.home() / ".codex")
+
+    @property
+    def config_path(self) -> Path:
+        return self.codex_home / "config.toml"
+
+    @property
+    def shims_path(self) -> Path:
+        """Where Codex keeps skill shims: ``skills/`` under the config root."""
+        return self.codex_home / "skills"
+
+    @property
+    def vault_env_path(self) -> Path:
+        """Where this harness's Vault AppRole ``.env`` lives: under the config root.
+
+        Matches the sibling adapters: ``vault.env``, not ``.env`` (the latter is
+        auto-sourced by direnv/dotenv, which would risk surfacing the AppRole
+        secret into other tools — violates "Inject, don't surface").
+        """
+        return self.codex_home / "vault.env"
+
+    def available(self) -> bool:
+        """Codex is provisionable iff it has been initialised on this host, i.e.
+        its ``config.toml`` exists.  Mirrors the "config file present" signal the
+        sibling adapters use."""
+        return self.config_path.is_file()
+
+    def mcp_servers(self) -> dict[str, McpServer]:
+        return _servers_from(_load_toml(self.config_path).get("mcp_servers"))
+
+    def command_shims(self) -> set[str]:
+        """Skill names Codex advertises: ``skills/<name>/SKILL.md`` dirs.
+
+        The reserved ``.system`` tree (Codex's bundled skills) and any other
+        dot-directory are excluded — acb neither enumerates nor writes there.
+        Read-only — only names are enumerated, never the shim bodies.  A missing
+        ``skills/`` dir yields an empty set rather than an error.
+        """
+        skills = self.shims_path
+        if not skills.is_dir():
+            return set()
+        return {
+            d.name
+            for d in skills.iterdir()
+            if not d.name.startswith(".") and (d / "SKILL.md").is_file()
+        }
+
+    def write_skill_shim(self, name: str, content: str) -> WriteResult:
+        """Render a skill shim at ``skills/<name>/SKILL.md``.  Create-only (refuses
+        to overwrite a hand-edited shim); callers guard on ``command_shims()``."""
+        return _create_file(self.shims_path / name / "SKILL.md", content)
+
+
+def _load_toml(path: Path) -> dict[str, object]:
+    """Load a TOML config file, returning ``{}`` on missing/corrupt (mirrors
+    ``_load_json``).  ``tomllib`` is stdlib (Python >= 3.11); it parses bytes, so
+    read-failures and decode errors both degrade to empty so the read path
+    (``doctor``) never crashes on a hand-mangled ``config.toml``."""
+    import tomllib  # noqa: PLC0415 (stdlib; lazy for parity with the sibling loaders)
+
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return {}
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        import sys
+
+        print(f"warning: {path}: corrupted TOML ({exc}); treating as empty", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _load_yaml(path: Path) -> dict[str, object]:
     """Load a YAML config file, returning ``{}`` on missing/corrupt (mirrors
     ``_load_json``).  ``pyyaml`` is imported lazily — the core stays
