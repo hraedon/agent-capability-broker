@@ -322,28 +322,54 @@ def _declares_naming(cap: Capability) -> bool:
 
     A declared naming contract opts the capability into the strict injection
     path: validated names, collision refusal, and a checkout receipt. Bare
-    capabilities keep the historical overwrite semantics.
+    capabilities keep the historical overwrite semantics. A *present but
+    malformed* declaration (e.g. ``env_prefix = 123`` or ``inject = "PG"``)
+    is a misconfiguration, not a silent downgrade to the bare path — it
+    fails closed here so an author who intended the strict path is never
+    silently routed to overwrite semantics (round-3 review MAJOR 1).
     """
     mapping = cap.options.get("inject")
     prefix = cap.options.get("env_prefix")
-    return (isinstance(mapping, dict) and bool(mapping)) or (
-        isinstance(prefix, str) and bool(prefix)
-    )
+    if mapping is not None and not isinstance(mapping, dict):
+        raise SecretSourceConfigError(
+            f"{cap.id}: options.inject must be a mapping "
+            f"(got {type(mapping).__name__})"
+        )
+    if prefix is not None and not isinstance(prefix, str):
+        raise SecretSourceConfigError(
+            f"{cap.id}: options.env_prefix must be a string "
+            f"(got {type(prefix).__name__})"
+        )
+    return bool(mapping) or bool(prefix)
 
 
 def _declared_fields(cap: Capability) -> list[str]:
     """The capability's secret field names, without resolving any value.
 
-    Mirrors the fail-closed selection `CredProvider._resolve` performs, so an
-    injection plan can be validated before any backend is contacted.
+    Mirrors the fail-closed selection `CredProvider._resolve` and
+    `cred_vault.resolve` perform, so an injection plan can be validated
+    before any backend is contacted. The two selections MUST agree: a
+    post-resolution `set(fields) != set(plan)` guard catches any remaining
+    drift, but matching here keeps the failure at plan-validation time
+    and the error message honest about the misconfiguration.
     """
     if source_kind(cap) is SecretSourceKind.ENV:
         return [str(cap.options.get("field", "password"))]
-    fields_opt = cap.options.get("fields")
-    if isinstance(fields_opt, list) and fields_opt:
+    if "fields" in cap.options:
+        fields_opt = cap.options.get("fields")
+        if not isinstance(fields_opt, list):
+            raise SecretSourceConfigError(
+                f"{cap.id}: options.fields must be a list "
+                f"(got {type(fields_opt).__name__})"
+            )
         return [str(f) for f in fields_opt]
     field_opt = cap.options.get("field")
-    if isinstance(field_opt, str) and field_opt:
+    if field_opt is not None:
+        if not isinstance(field_opt, str):
+            raise SecretSourceConfigError(
+                f"{cap.id}: options.field must be a string "
+                f"(got {type(field_opt).__name__})"
+            )
         return [field_opt]
     raise SecretSourceConfigError(
         f"{cap.id}: field selection required — set options.field or "
@@ -471,6 +497,12 @@ def _exec_checkout(
     used: set[str] = set()
     plans: list[tuple[str, dict[str, str]]] = []
     for cap in caps:
+        # Fail-closed on a present-but-malformed `inject`/`env_prefix` (round-2
+        # review MAJOR 1): `_injection_plan` would otherwise silently ignore a
+        # non-mapping `inject` / non-string `env_prefix` and fall back to bare
+        # naming, routing an author who intended the strict path onto overwrite
+        # semantics. Validating here covers both single-cap and composed entry.
+        _declares_naming(cap)
         if not _RECEIPT_CAPABILITY_ID.fullmatch(cap.id):
             raise SecretSourceConfigError(
                 f"{cap.id}: capability id is not receipt-conformant "
@@ -492,16 +524,24 @@ def _exec_checkout(
         )
     all_vars = sorted(var for _, plan in plans for var in plan.values())
     checkout_id = "+".join(cap.id for cap in caps)
-    action = Action(
+    # The started action describes what is *about to be attempted*, not what
+    # has already happened — `injected {vars}` is reserved for the terminal
+    # action built after the child env is actually populated (round-3 review
+    # finding: provenance summaries must be honest about pre/post-state so a
+    # `failed` record never claims injection already occurred).
+    started_action = Action(
         checkout_id,
         "local",
         "exec",
         checkout_id,
-        f"injected {all_vars} into child '{argv[0]}' (invocation {invocation_id})",
+        f"checkout starting for child '{argv[0]}' (invocation {invocation_id})",
     )
-    provenance.emit(ActionResult(action, "started", "checkout resolution starting"))
+    provenance.emit(
+        ActionResult(started_action, "started", "checkout resolution starting")
+    )
 
-    terminal = ActionResult(action, "failed", "checkout interrupted")
+    terminal_action = started_action
+    terminal = ActionResult(terminal_action, "failed", "checkout interrupted")
     fields: dict[str, str] = {}
     child_env: dict[str, str] = {}
     result: subprocess.CompletedProcess[bytes] | None = None
@@ -512,11 +552,14 @@ def _exec_checkout(
             try:
                 fields = resolve(cap)
             except Exception:
-                terminal = ActionResult(action, "failed", f"{cap.id}: resolution failed")
+                terminal = ActionResult(
+                    terminal_action, "failed", f"{cap.id}: resolution failed"
+                )
                 raise
             if set(fields) != set(plan):
                 terminal = ActionResult(
-                    action, "failed", f"{cap.id}: resolved fields mismatch declaration"
+                    terminal_action, "failed",
+                    f"{cap.id}: resolved fields mismatch declaration",
                 )
                 raise RuntimeError(
                     f"{cap.id}: resolved fields {sorted(fields)} do not match the "
@@ -525,12 +568,19 @@ def _exec_checkout(
             for field, value in fields.items():
                 child_env[plan[field]] = value
         child_env["ACB_CHECKOUT_RECEIPT"] = receipt
+        terminal_action = Action(
+            checkout_id,
+            "local",
+            "exec",
+            checkout_id,
+            f"injected {all_vars} into child '{argv[0]}' (invocation {invocation_id})",
+        )
         try:
             completed = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
         except OSError as exc:
             error_kind = type(exc).__name__
             terminal = ActionResult(
-                action, "failed", f"child launch failed ({error_kind})"
+                terminal_action, "failed", f"child launch failed ({error_kind})"
             )
             pending_error = RuntimeError(
                 f"{checkout_id}: child launch failed ({error_kind})"
@@ -538,7 +588,7 @@ def _exec_checkout(
         else:
             result = completed
             terminal = ActionResult(
-                action,
+                terminal_action,
                 "applied" if completed.returncode == 0 else "failed",
                 f"child exited {completed.returncode}",
             )
@@ -555,7 +605,8 @@ def _exec_checkout(
 
     if pending_error is not None:
         raise pending_error
-    assert result is not None
+    if result is None:  # explicit guard; an `assert` would be stripped under `python -O`
+        raise RuntimeError(f"{checkout_id}: checkout completed without a child result")
     return result.returncode
 
 
@@ -962,35 +1013,96 @@ class CredProvider:
                 # into the strict path: validated non-colliding names plus a
                 # checkout receipt.
                 return _exec_checkout([cap], argv, self._resolve)
-            # Bare Vault/env capabilities keep their established injection,
-            # environment, timeout, and single-provenance behavior; the child
-            # additionally receives a fresh single-capability receipt.
-            legacy_fields = self._resolve(cap)
-            legacy_plan = {
-                field: _inject_var(field, None) for field in legacy_fields
-            }
-            legacy_env = os.environ.copy()
-            injected: list[str] = []
-            for field, value in legacy_fields.items():
-                var = legacy_plan[field]
-                legacy_env[var] = value
-                injected.append(var)
-            legacy_env["ACB_CHECKOUT_RECEIPT"] = _checkout_receipt(
-                [(cap.id, legacy_plan)],
-                invocation_id=uuid.uuid4().hex,
-                ttl_seconds=_RECEIPT_TTL_SECONDS,
+            # Bare Vault/env capabilities keep their established injection
+            # semantics (bare field names, overwrite inherited vars, fresh
+            # single-capability receipt). F9 follow-up: the same try/finally,
+            # OSError-containment, and value-zeroing discipline the strict and
+            # suite paths already apply — a launch failure on the bare path
+            # must not leak a resolved value or skip terminal provenance.
+            started_action = Action(
+                cap.id, "local", "exec", cap.id,
+                f"checkout starting for child '{argv[0]}'",
             )
-            action = Action(
-                cap.id,
-                "local",
-                "exec",
-                cap.id,
-                f"injected {sorted(injected)} into child '{argv[0]}'",
-            )
-            legacy_result = subprocess.run(argv, env=legacy_env)  # noqa: S603
             provenance.emit(
-                ActionResult(action, "applied", f"child exited {legacy_result.returncode}")
+                ActionResult(started_action, "started", "checkout resolution starting")
             )
+            terminal_action = started_action
+            terminal = ActionResult(terminal_action, "failed", "checkout interrupted")
+            legacy_fields: dict[str, str] = {}
+            legacy_plan: dict[str, str] = {}
+            legacy_env: dict[str, str] = {}
+            legacy_result: subprocess.CompletedProcess[bytes] | None = None
+            legacy_pending_error: RuntimeError | None = None
+            try:
+                try:
+                    legacy_fields = self._resolve(cap)
+                except Exception:
+                    terminal = ActionResult(
+                        terminal_action, "failed", "credential resolution failed"
+                    )
+                    raise
+                legacy_plan = {
+                    field: _inject_var(field, None) for field in legacy_fields
+                }
+                legacy_env = os.environ.copy()
+                injected: list[str] = []
+                for field, value in legacy_fields.items():
+                    var = legacy_plan[field]
+                    legacy_env[var] = value
+                    injected.append(var)
+                legacy_receipt = _checkout_receipt(
+                    [(cap.id, legacy_plan)],
+                    invocation_id=uuid.uuid4().hex,
+                    ttl_seconds=_RECEIPT_TTL_SECONDS,
+                )
+                if len(legacy_receipt.encode("utf-8")) > _MAX_RECEIPT_BYTES:
+                    # Consistency with the strict path's plan-time byte limit
+                    # (round-3 review MINOR 3): a bare capability with many
+                    # fields must not emit an oversized receipt either.
+                    terminal = ActionResult(
+                        terminal_action, "failed",
+                        "checkout receipt exceeds the 16 KiB contract limit",
+                    )
+                    raise SecretSourceConfigError(
+                        "checkout receipt exceeds the 16 KiB contract limit; "
+                        "reduce the number of fields"
+                    )
+                legacy_env["ACB_CHECKOUT_RECEIPT"] = legacy_receipt
+                terminal_action = Action(
+                    cap.id, "local", "exec", cap.id,
+                    f"injected {sorted(injected)} into child '{argv[0]}'",
+                )
+                try:
+                    legacy_result = subprocess.run(argv, env=legacy_env)  # noqa: S603
+                except OSError as exc:
+                    error_kind = type(exc).__name__
+                    terminal = ActionResult(
+                        terminal_action, "failed", f"child launch failed ({error_kind})"
+                    )
+                    legacy_pending_error = RuntimeError(
+                        f"{cap.id}: child launch failed ({error_kind})"
+                    )
+                else:
+                    terminal = ActionResult(
+                        terminal_action,
+                        "applied" if legacy_result.returncode == 0 else "failed",
+                        f"child exited {legacy_result.returncode}",
+                    )
+            finally:
+                # Best-effort lifetime reduction (same caveat as the strict
+                # path: Python strings cannot be cryptographically erased).
+                for field in legacy_fields:
+                    legacy_fields[field] = ""
+                for var in legacy_plan.values():
+                    if var in legacy_env:
+                        legacy_env[var] = ""
+                legacy_env["ACB_CHECKOUT_RECEIPT"] = ""
+                provenance.emit(terminal)
+
+            if legacy_pending_error is not None:
+                raise legacy_pending_error
+            if legacy_result is None:  # explicit guard (not `assert`); survives `python -O`
+                raise RuntimeError(f"{cap.id}: checkout completed without a child result")
             return legacy_result.returncode
 
         # Suite command, manifest, collision, and receipt-name validation all
