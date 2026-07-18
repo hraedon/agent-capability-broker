@@ -59,6 +59,17 @@ engine    = "playwright"
 browser   = "chromium"
 backend   = "local"                       # or "remote" + endpoint
 harnesses = ["claude", "opencode"]
+
+# WI-010: a vault-source capability with a declared naming contract. The
+# fields inject as EXAMPLE_CONTROL_USERNAME / EXAMPLE_CONTROL_PASSWORD, so two
+# [username, password] capabilities can compose in one checkout without
+# colliding and without shadowing reserved names like USERNAME.
+[capability."cred:example-control"]
+provider   = "cred"
+vault      = "kv/example/lab/control"
+fields     = ["username", "password"]
+env_prefix = "EXAMPLE_CONTROL"            # or inject = { username = "...", ... }
+harnesses  = ["claude", "opencode"]
 ```
 
 - `harnesses` lists which harnesses *should* expose this capability. `doctor`
@@ -226,9 +237,56 @@ value-free shape:
 ```
 
 This is parent-launch binding and provenance correlation metadata, not a
-cryptographic authorization token. The list is envelope-extensible, but this
-slice emits one checkout. Nested receipt inheritance and atomic multi-capability
-checkout/composition are refused and remain live work.
+cryptographic authorization token. Nested receipt inheritance is refused on
+every validated path.
+
+### Injection naming and composed checkout (WI-010)
+
+Every cred `exec` child receives an `ACB_CHECKOUT_RECEIPT`, not only the suite
+source. How a field becomes a child env name:
+
+1. an explicit `inject = { field = "ENV_NAME" }` entry wins;
+2. else `env_prefix = "EXAMPLE_CONTROL"` names the field
+   `EXAMPLE_CONTROL_FIELD`;
+3. else the bare upper-cased field name (`username` → `USERNAME`).
+
+Declaring `inject` or `env_prefix` opts the capability into the **strict
+path**: names are validated against the receipt contract shape
+(`[A-Z][A-Z0-9_]{0,63}`, receipt-conformant capability ids), reserved names
+(`USERNAME`, `USER`, `PATH`, `HOME`, … — a superset of the evidence-lab
+boundary's denylist) are refused, collisions with the inherited environment
+or with other capabilities in the same checkout are refused, and an inherited
+`ACB_CHECKOUT_RECEIPT` is refused — all before any secret is resolved.
+
+Two deliberate behavior notes:
+
+- **`inject`-declared capabilities are stricter than they were.** Before
+  WI-010 an `inject` mapping silently overwrote a pre-set variable of the
+  same name; now it refuses. This is fail-closed on purpose: a declared
+  naming contract that collides with the inherited environment is exactly
+  the condition the strict path exists to catch. Only *bare* capabilities
+  (no `inject`, no `env_prefix`) keep the historical overwrite semantics.
+- **Bare-path receipts are correlation metadata only.** A bare capability's
+  receipt uses bare field names (e.g. `USERNAME`), which strict consumers
+  like the evidence-lab boundary reject by design — such consumers require
+  a declared naming contract. The bare path also *replaces* an inherited
+  receipt rather than refusing it (legacy nesting compatibility); the
+  strict path refuses nesting outright.
+
+**Composed checkout** runs one command with several capabilities at once:
+
+```
+acb exec cred:example-control cred:example-guest -- <command> [args...]
+```
+
+All capabilities resolve from the invoking access plane (one `ACB_VAULT_ENV`),
+inject under their declared names, and share a single receipt whose
+`checkouts` array covers every capability in order. This replaces nested
+`acb exec` shells that re-export values by hand — the pattern that moved
+secret handling back into ad-hoc shell. Only non-suite cred capabilities
+compose; the suite source keeps its dedicated exact-command trust model.
+Per-capability access-plane routing at exec time (two planes in one composed
+checkout) remains open.
 
 The bounded runner owns a new POSIX session or Windows process group. On timeout
 or interruption it terminates and reaps the tree: POSIX `killpg` TERM followed

@@ -22,9 +22,9 @@ CORE_MODULES = [
     "secret_sources.py",
 ]
 STDLIB_OK = {
-    "__future__", "argparse", "ast", "dataclasses", "enum", "functools", "importlib", "json",
-    "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing", "datetime",
-    "subprocess", "re", "shutil", "signal", "time", "uuid",
+    "__future__", "argparse", "ast", "collections", "dataclasses", "enum", "functools",
+    "importlib", "json", "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing",
+    "datetime", "subprocess", "re", "shutil", "signal", "time", "uuid",
     # platformdirs: config-dir portability (not the truth/verdict path) — sole permitted runtime dep
     "platformdirs",
 }

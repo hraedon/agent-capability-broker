@@ -77,10 +77,9 @@ def _install_fake(monkeypatch: pytest.MonkeyPatch, fake: FakeResolver) -> None:
 
 def _synthetic_receipt() -> str:
     return providers._checkout_receipt(
-        _cap(),
-        {"username": "LAB_USERNAME", "password": "LAB_PASSWORD"},
+        [(_cap().id, {"username": "LAB_USERNAME", "password": "LAB_PASSWORD"})],
         invocation_id="8c03d42017fe4e538ea58cfe18b6d999",
-        timeout_seconds=120,
+        ttl_seconds=120,
     )
 
 

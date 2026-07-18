@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -21,15 +22,17 @@ from .model import (
     KNOWN_HARNESSES,
     Action,
     ActionResult,
+    Capability,
     ManifestError,
     Status,
     Verdict,
     parse_manifest,
     resolve_manifest,
 )
-from .providers import PROVIDERS, adapters
+from .providers import PROVIDERS, adapters, exec_composed
 
 _STABLE_INSTALL_HARNESSES = ("claude", "opencode")
+_CAPABILITY_ID = re.compile(r"^(?:cred|e2e):\S+$")
 
 
 def _inspect_all(manifest_path: Path) -> list[Verdict]:
@@ -321,32 +324,76 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     return 1 if unapplied else 0
 
 
-def _cmd_exec(args: argparse.Namespace) -> int:
-    argv = list(args.argv)
-    manifest = args.manifest
+_EXEC_USAGE = "usage: acb exec [-m MANIFEST] <cap> [<cap>…] -- <cmd…>"
 
-    # argparse.REMAINDER captures everything after the capability positional,
-    # including -m/--manifest flags that should have been parsed as options.
-    # Extract them so `acb exec <cap> -m manifest.toml -- cmd` works (not just
-    # `acb exec -m manifest.toml <cap> -- cmd`).
+
+def _cmd_exec_raw(raw: list[str]) -> int:
+    """Parse and run `acb exec` from the raw tokens after the subcommand.
+
+    Deliberately not argparse: argparse consumes the first `--` itself before
+    REMAINDER capture, which made any tokenwise capability/command split
+    downstream unsound (adversarial review of PR #14, F1 — a child argument
+    shaped like `cred:x` could trigger an unrequested checkout). Here the
+    first literal `--` is the authoritative boundary: `-m` and capability ids
+    may only appear before it; everything after it is the child command,
+    never inspected. Without `--`, the historical single-capability form
+    `acb exec <cap> <cmd…>` is preserved verbatim; composing requires `--`.
+    """
+    if "--" in raw:
+        sep = raw.index("--")
+        head, command = raw[:sep], raw[sep + 1 :]
+    else:
+        head, command = raw, []
+
+    if any(tok in ("-h", "--help") for tok in head):
+        print(_EXEC_USAGE)
+        return 0
+
+    manifest: str | None = None
+    cap_ids: list[str] = []
     i = 0
-    while i < len(argv):
-        tok = argv[i]
-        if tok in ("-m", "--manifest") and i + 1 < len(argv):
-            manifest = argv[i + 1]
-            del argv[i:i + 2]
+    error: str | None = None
+    while i < len(head):
+        tok = head[i]
+        if tok in ("-m", "--manifest"):
+            if i + 1 >= len(head):
+                error = f"{tok} requires a value"
+                break
+            manifest = head[i + 1]
+            i += 2
             continue
         if tok.startswith("--manifest="):
             manifest = tok.split("=", 1)[1]
-            del argv[i]
+            i += 1
             continue
-        if tok == "--":
-            del argv[i]
+        if tok.startswith("-") and not cap_ids:
+            error = f"unknown option {tok!r}"
             break
+        if "--" not in raw and cap_ids:
+            # Historical form: first non-flag token is the capability, the
+            # rest is the child command, uninspected.
+            command = head[i:]
+            break
+        if "--" in raw and not _CAPABILITY_ID.fullmatch(tok):
+            error = (
+                f"{tok!r} before '--' is not a capability id "
+                f"(expected provider:name, e.g. cred:svc-bot)"
+            )
+            break
+        cap_ids.append(tok)
         i += 1
 
-    if not argv:
-        print("error: no command (usage: acb exec <cap> -- <cmd…>)", file=sys.stderr)
+    if error is not None:
+        print(f"error: {error}\n{_EXEC_USAGE}", file=sys.stderr)
+        return 2
+    if not cap_ids:
+        print(f"error: no capability id\n{_EXEC_USAGE}", file=sys.stderr)
+        return 2
+    if not command:
+        print(f"error: no command\n{_EXEC_USAGE}", file=sys.stderr)
+        return 2
+    if len(cap_ids) != len(set(cap_ids)):
+        print(f"error: repeated capability id\n{_EXEC_USAGE}", file=sys.stderr)
         return 2
 
     try:
@@ -355,17 +402,28 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    cap = next((c for c in caps if c.id == args.capability), None)
-    if cap is None:
-        print(f"error: capability {args.capability!r} not in manifest", file=sys.stderr)
-        return 2
-    provider = PROVIDERS.get(cap.provider)
+    wanted: list[Capability] = []
+    for cap_id in cap_ids:
+        cap = next((c for c in caps if c.id == cap_id), None)
+        if cap is None:
+            print(f"error: capability {cap_id!r} not in manifest", file=sys.stderr)
+            return 2
+        wanted.append(cap)
+
+    if len(wanted) > 1:
+        try:
+            return exec_composed(wanted, command)
+        except (RuntimeError, NotImplementedError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    provider = PROVIDERS.get(wanted[0].provider)
     if provider is None:
-        print(f"error: no provider {cap.provider!r}", file=sys.stderr)
+        print(f"error: no provider {wanted[0].provider!r}", file=sys.stderr)
         return 2
 
     try:
-        return provider.exec(cap, argv)
+        return provider.exec(wanted[0], command)
     except (RuntimeError, NotImplementedError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -608,16 +666,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rec.set_defaults(func=_cmd_reconcile)
 
+    # `exec` is registered for `acb --help` discovery only. `main()` routes it
+    # to `_cmd_exec_raw` before argparse runs, because argparse consumes the
+    # first `--` — the token this command's grammar depends on (PR #14 F1).
     ex = sub.add_parser(
-        "exec", help="run a command with a capability injected (never surfaced)"
+        "exec", help="run a command with one or more capabilities injected (never surfaced)"
     )
-    ex.add_argument(
-        "-m", "--manifest", default=None,
-        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
-    )
-    ex.add_argument("capability", help="capability id, e.g. cred:svc-bot")
-    ex.add_argument("argv", nargs=argparse.REMAINDER, help="-- command and args to run")
-    ex.set_defaults(func=_cmd_exec)
+    ex.add_argument("tokens", nargs=argparse.REMAINDER, help=_EXEC_USAGE)
 
     ih = sub.add_parser(
         "install-harness",
@@ -641,6 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "exec":
+        return _cmd_exec_raw(raw[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.version:
