@@ -366,7 +366,23 @@ def _cmd_exec_raw(raw: list[str]) -> int:
             manifest = tok.split("=", 1)[1]
             i += 1
             continue
+        if (
+            "--" in raw
+            and tok.startswith("-")
+            and tok not in ("-m", "--manifest")
+            and not tok.startswith("--manifest=")
+        ):
+            # In the composed form (with '--'), any head token starting with
+            # '-' that is not a manifest option is unknown — refuse it
+            # explicitly rather than misreporting as a non-capability id
+            # (review F11). The historical no-'--' form still lets the first
+            # capability eat the rest of the line as the child command.
+            error = f"unknown option {tok!r}"
+            break
         if tok.startswith("-") and not cap_ids:
+            # No '--' and no capability yet: an unknown option-shaped token
+            # is still unknown (the historical form requires the capability
+            # to be the first token).
             error = f"unknown option {tok!r}"
             break
         if "--" not in raw and cap_ids:

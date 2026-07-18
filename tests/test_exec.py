@@ -80,9 +80,16 @@ def test_provenance_has_no_secret(
 
     CredProvider().exec(cap, [sys.executable, "-c", "pass"])
     log = (state / "provenance.jsonl").read_text()
-    event = json.loads(log.strip())
-    assert event["action"] == "exec"
-    assert "PASSWORD" in event["summary"]        # records the var name...
+    # The bare path now emits started + terminal events (review F9 follow-up:
+    # the bare path gained the same provenance discipline as the strict and
+    # suite paths). Parse every JSONL line; assert no secret anywhere and
+    # that the terminal event records the injected var name.
+    events = [json.loads(line) for line in log.splitlines() if line.strip()]
+    assert len(events) >= 2
+    assert events[0]["result"] == "started"
+    terminal = events[-1]
+    assert terminal["action"] == "exec"
+    assert "PASSWORD" in terminal["summary"]     # records the var name...
     assert SECRET not in log                      # ...never the value
 
 

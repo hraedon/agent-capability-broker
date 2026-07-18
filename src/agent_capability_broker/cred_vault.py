@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from .model import Capability, _user_config_root, suite_config_dir
+from .secret_sources import SecretSourceConfigError
 
 _K8S_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
@@ -209,24 +210,27 @@ def resolve(cap: Capability) -> dict[str, str]:
     and defaulting to "all fields" risks over-exposing side-channel material
     (rotation notes, audit IDs, tokens stored alongside the password). Explicit
     selection is the safe default.
-    """
-    try:
-        import hvac
-    except ImportError as exc:
-        raise RuntimeError(
-            "cred source 'vault' needs the [cred] extra: "
-            "pip install 'agent-capability-broker[cred]'"
-        ) from exc
 
+    Config-shape validation runs *before* the optional `hvac` import so a
+    malformed declaration fails fast with a clear `SecretSourceConfigError`
+    even when the `[cred]` extra is not installed (round-3 review: the
+    `_declared_fields`/`resolve` agreement must be observable without the
+    optional dependency).
+    """
     fields_opt = cap.options.get("fields")
     if "fields" in cap.options and not isinstance(fields_opt, list):
-        raise RuntimeError(
+        # Config-shape error (round-3 review MINOR 4): raise the same type
+        # `_declared_fields` raises so the F10 agreement claim holds on type
+        # too, not just on the selected set. `SecretSourceConfigError`
+        # subclasses RuntimeError, so existing `pytest.raises(RuntimeError)`
+        # callers keep matching.
+        raise SecretSourceConfigError(
             f"capability {cap.id!r}: options.fields must be a list "
             f"(got {type(fields_opt).__name__})"
         )
     field_opt = cap.options.get("field")
     if field_opt is not None and not isinstance(field_opt, str):
-        raise RuntimeError(
+        raise SecretSourceConfigError(
             f"capability {cap.id!r}: options.field must be a string "
             f"(got {type(field_opt).__name__})"
         )
@@ -235,7 +239,7 @@ def resolve(cap: Capability) -> dict[str, str]:
     elif field_opt is not None:
         want = [field_opt]
     else:
-        raise RuntimeError(
+        raise SecretSourceConfigError(
             f"capability {cap.id!r}: field selection required — set options.field "
             f"or options.fields (an explicit list of Vault secret keys to inject)"
         )
@@ -247,6 +251,14 @@ def resolve(cap: Capability) -> dict[str, str]:
     path = cap.options.get("vault")
     if not isinstance(path, str) or not path:
         raise RuntimeError(f"capability {cap.id!r} has no 'vault' path")
+
+    try:
+        import hvac
+    except ImportError as exc:
+        raise RuntimeError(
+            "cred source 'vault' needs the [cred] extra: "
+            "pip install 'agent-capability-broker[cred]'"
+        ) from exc
 
     try:
         client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN"))
