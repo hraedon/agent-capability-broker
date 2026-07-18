@@ -409,6 +409,117 @@ def test_env_prefix_alone_prevents_bare_collision_across_env(
     assert rc == 0
 
 
+# --- Regressions from the PR #14 adversarial review ---
+
+
+def test_child_command_tokens_are_never_treated_as_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: a child argument shaped like `cred:x` must stay in the child argv,
+    not become a checkout request (argparse eats the first `--`, so the old
+    tokenwise scan ran over the whole child command)."""
+    monkeypatch.setenv("SRC", PASS_A)
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        'from_env="SRC"\nharnesses=["opencode"]\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "argv.json"
+    code = f"import json,sys,pathlib;pathlib.Path(r'{out}').write_text(json.dumps(sys.argv[1:]))"
+
+    rc = main(
+        ["exec", "-m", str(manifest), "cred:test", "--",
+         sys.executable, "-c", code, "cred:zzz", "hello", "-m", "marker"]
+    )
+
+    assert rc == 0
+    assert json.loads(out.read_text()) == ["cred:zzz", "hello", "-m", "marker"]
+
+
+def test_historical_single_capability_form_without_separator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SRC", PASS_A)
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        'from_env="SRC"\nharnesses=["opencode"]\n',
+        encoding="utf-8",
+    )
+
+    rc = main(
+        ["exec", "-m", str(manifest), "cred:test",
+         sys.executable, "-c", "raise SystemExit(3)"]
+    )
+
+    assert rc == 3
+
+
+def test_non_capability_token_before_separator_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["exec", "cred:test", "bogus-token", "--", sys.executable, "-c", "pass"])
+    assert rc == 2
+    assert "bogus-token" in capsys.readouterr().err
+
+
+def test_lowercase_env_prefix_refused_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: names the evidence-lab boundary rejects must be refused by acb
+    before a secret is resolved, not injected and then rejected downstream."""
+
+    def _never(cap: Capability) -> dict[str, str]:
+        raise AssertionError("resolution must not run when the plan is invalid")
+
+    monkeypatch.setattr(cred_vault, "resolve", _never)
+    cap = _vault_cap("hyperv-control", "hyperv_control")
+
+    with pytest.raises(SecretSourceConfigError, match="not a valid environment name"):
+        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+
+
+def test_nonconformant_capability_id_refused_on_strict_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _never(cap: Capability) -> dict[str, str]:
+        raise AssertionError("resolution must not run when the plan is invalid")
+
+    monkeypatch.setattr(cred_vault, "resolve", _never)
+    cap = Capability(
+        "cred:Lab_Control", "cred", ("opencode",),
+        {"vault": "kv/example/lab/x", "fields": ["username", "password"],
+         "env_prefix": "LAB_CONTROL"},
+    )
+
+    with pytest.raises(SecretSourceConfigError, match="receipt-conformant"):
+        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+
+
+def test_launch_failure_emits_provenance_and_contained_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4: a child that cannot launch must leave started+failed provenance
+    (value-free) and raise a contained RuntimeError, not a raw OSError."""
+    state = tmp_path / "state"
+    monkeypatch.setenv("ACB_STATE_DIR", str(state))
+    _fake_resolve(
+        monkeypatch,
+        {"cred:hyperv-control": {"username": USER_A, "password": PASS_A}},
+    )
+    cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
+
+    with pytest.raises(RuntimeError, match="child launch failed"):
+        CredProvider().exec(cap, [str(tmp_path / "no-such-binary")])
+
+    log = (state / "provenance.jsonl").read_text()
+    assert '"started"' in log and "child launch failed" in log
+    assert USER_A not in log and PASS_A not in log
+
+
 def test_receipt_module_constants_align_with_evidence_lab() -> None:
     """acb must refuse at least every name the evidence-lab boundary refuses,
     or acb would issue receipts the consumer rejects."""

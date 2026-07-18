@@ -251,13 +251,27 @@ source. How a field becomes a child env name:
 3. else the bare upper-cased field name (`username` → `USERNAME`).
 
 Declaring `inject` or `env_prefix` opts the capability into the **strict
-path**: names are validated, reserved names (`USERNAME`, `USER`, `PATH`,
-`HOME`, … — a superset of the evidence-lab boundary's denylist) are refused,
-collisions with the inherited environment or with other capabilities in the
-same checkout are refused, and an inherited `ACB_CHECKOUT_RECEIPT` is refused —
-all before any secret is resolved. Bare capabilities keep the historical
-overwrite semantics so existing shims are unaffected; they still receive a
-fresh single-capability receipt.
+path**: names are validated against the receipt contract shape
+(`[A-Z][A-Z0-9_]{0,63}`, receipt-conformant capability ids), reserved names
+(`USERNAME`, `USER`, `PATH`, `HOME`, … — a superset of the evidence-lab
+boundary's denylist) are refused, collisions with the inherited environment
+or with other capabilities in the same checkout are refused, and an inherited
+`ACB_CHECKOUT_RECEIPT` is refused — all before any secret is resolved.
+
+Two deliberate behavior notes:
+
+- **`inject`-declared capabilities are stricter than they were.** Before
+  WI-010 an `inject` mapping silently overwrote a pre-set variable of the
+  same name; now it refuses. This is fail-closed on purpose: a declared
+  naming contract that collides with the inherited environment is exactly
+  the condition the strict path exists to catch. Only *bare* capabilities
+  (no `inject`, no `env_prefix`) keep the historical overwrite semantics.
+- **Bare-path receipts are correlation metadata only.** A bare capability's
+  receipt uses bare field names (e.g. `USERNAME`), which strict consumers
+  like the evidence-lab boundary reject by design — such consumers require
+  a declared naming contract. The bare path also *replaces* an inherited
+  receipt rather than refusing it (legacy nesting compatibility); the
+  strict path refuses nesting outright.
 
 **Composed checkout** runs one command with several capabilities at once:
 

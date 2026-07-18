@@ -41,7 +41,14 @@ from .secret_sources import (
 )
 
 _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webkit")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The acb.checkout-receipt.v1 contract shape (PR #14 F2): env names and
+# capability ids acb accepts on a validated path must be names the receipt's
+# reference consumer (windows-evidence-lab capabilities.py) also accepts —
+# otherwise acb injects a real secret and the consumer then rejects the
+# receipt at its launch boundary.
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_RECEIPT_CAPABILITY_ID = re.compile(r"^cred:[a-z][a-z0-9-]{0,62}$")
+_MAX_RECEIPT_BYTES = 16 * 1024
 _RESERVED_INJECT_VARS = frozenset(
     {
         "CODEX_HOME", "COMSPEC", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME",
@@ -464,12 +471,25 @@ def _exec_checkout(
     used: set[str] = set()
     plans: list[tuple[str, dict[str, str]]] = []
     for cap in caps:
+        if not _RECEIPT_CAPABILITY_ID.fullmatch(cap.id):
+            raise SecretSourceConfigError(
+                f"{cap.id}: capability id is not receipt-conformant "
+                f"(expected cred:[a-z][a-z0-9-]*, max 63 chars after 'cred:')"
+            )
         plan = _injection_plan(
             cap, _declared_fields(cap), used=used, inherited=inherited
         )
         plans.append((cap.id, plan))
 
     invocation_id = uuid.uuid4().hex
+    receipt = _checkout_receipt(
+        plans, invocation_id=invocation_id, ttl_seconds=_RECEIPT_TTL_SECONDS
+    )
+    if len(receipt.encode("utf-8")) > _MAX_RECEIPT_BYTES:
+        raise SecretSourceConfigError(
+            "checkout receipt exceeds the 16 KiB contract limit; "
+            "reduce the number of composed capabilities"
+        )
     all_vars = sorted(var for _, plan in plans for var in plan.values())
     checkout_id = "+".join(cap.id for cap in caps)
     action = Action(
@@ -479,29 +499,63 @@ def _exec_checkout(
         checkout_id,
         f"injected {all_vars} into child '{argv[0]}' (invocation {invocation_id})",
     )
+    provenance.emit(ActionResult(action, "started", "checkout resolution starting"))
 
-    child_env = os.environ.copy()
-    for cap, (_, plan) in zip(caps, plans, strict=True):
-        fields = resolve(cap)
-        if set(fields) != set(plan):
-            raise RuntimeError(
-                f"{cap.id}: resolved fields {sorted(fields)} do not match the "
-                f"declared selection {sorted(plan)}"
+    terminal = ActionResult(action, "failed", "checkout interrupted")
+    fields: dict[str, str] = {}
+    child_env: dict[str, str] = {}
+    result: subprocess.CompletedProcess[bytes] | None = None
+    pending_error: RuntimeError | None = None
+    try:
+        child_env = os.environ.copy()
+        for cap, (_, plan) in zip(caps, plans, strict=True):
+            try:
+                fields = resolve(cap)
+            except Exception:
+                terminal = ActionResult(action, "failed", f"{cap.id}: resolution failed")
+                raise
+            if set(fields) != set(plan):
+                terminal = ActionResult(
+                    action, "failed", f"{cap.id}: resolved fields mismatch declaration"
+                )
+                raise RuntimeError(
+                    f"{cap.id}: resolved fields {sorted(fields)} do not match the "
+                    f"declared selection {sorted(plan)}"
+                )
+            for field, value in fields.items():
+                child_env[plan[field]] = value
+        child_env["ACB_CHECKOUT_RECEIPT"] = receipt
+        try:
+            completed = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
+        except OSError as exc:
+            error_kind = type(exc).__name__
+            terminal = ActionResult(
+                action, "failed", f"child launch failed ({error_kind})"
             )
-        for field, value in fields.items():
-            child_env[plan[field]] = value
-    child_env["ACB_CHECKOUT_RECEIPT"] = _checkout_receipt(
-        plans, invocation_id=invocation_id, ttl_seconds=_RECEIPT_TTL_SECONDS
-    )
+            pending_error = RuntimeError(
+                f"{checkout_id}: child launch failed ({error_kind})"
+            )
+        else:
+            result = completed
+            terminal = ActionResult(
+                action,
+                "applied" if completed.returncode == 0 else "failed",
+                f"child exited {completed.returncode}",
+            )
+    finally:
+        # Best-effort lifetime reduction, matching the suite path's caveat:
+        # Python strings cannot be cryptographically erased.
+        for field in fields:
+            fields[field] = ""
+        for _, plan in plans:
+            for var in plan.values():
+                if var in child_env:
+                    child_env[var] = ""
+        provenance.emit(terminal)
 
-    result = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
-    provenance.emit(
-        ActionResult(
-            action,
-            "applied" if result.returncode == 0 else "failed",
-            f"child exited {result.returncode}",
-        )
-    )
+    if pending_error is not None:
+        raise pending_error
+    assert result is not None
     return result.returncode
 
 
