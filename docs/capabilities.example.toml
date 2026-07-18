@@ -22,3 +22,21 @@ engine    = "playwright"
 browser   = "chromium"
 backend   = "local"                    # or "remote" with an endpoint key
 harnesses = ["claude", "opencode"]
+
+# WI-010: declared naming contract for the vault source. env_prefix names the
+# fields EXAMPLE_CONTROL_USERNAME / EXAMPLE_CONTROL_PASSWORD so two
+# [username, password] capabilities compose in one checkout:
+#   acb exec cred:example-control cred:example-guest -- <command> [args...]
+[capability."cred:example-control"]
+provider   = "cred"
+vault      = "kv/example/lab/control"
+fields     = ["username", "password"]
+env_prefix = "EXAMPLE_CONTROL"         # or inject = { username = "EX_USER", password = "EX_PASS" }
+harnesses  = ["claude", "opencode"]
+
+[capability."cred:example-guest"]
+provider   = "cred"
+vault      = "kv/example/lab/guest"
+fields     = ["username", "password"]
+env_prefix = "EXAMPLE_GUEST"
+harnesses  = ["claude", "opencode"]

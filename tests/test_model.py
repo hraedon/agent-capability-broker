@@ -26,7 +26,12 @@ def _write(tmp_path: Path, body: str) -> Path:
 def test_example_manifest_parses() -> None:
     caps = parse_manifest(EXAMPLE)
     ids = {c.id for c in caps}
-    assert ids == {"cred:svc-bot", "e2e:chromium"}
+    assert ids == {
+        "cred:svc-bot",
+        "e2e:chromium",
+        "cred:example-control",
+        "cred:example-guest",
+    }
     e2e = next(c for c in caps if c.id == "e2e:chromium")
     assert e2e.provider == "e2e"
     assert e2e.harnesses == ("claude", "opencode")

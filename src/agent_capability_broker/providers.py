@@ -21,6 +21,7 @@ import signal
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -43,10 +44,16 @@ _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webk
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED_INJECT_VARS = frozenset(
     {
-        "COMSPEC", "HOME", "PATH", "PATHEXT", "PYTHONHOME", "PYTHONPATH",
-        "ACB_CHECKOUT_RECEIPT", "SHELL", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
+        "CODEX_HOME", "COMSPEC", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME",
+        "PATH", "PATHEXT", "PYTHONHOME", "PYTHONPATH", "ACB_CHECKOUT_RECEIPT",
+        "SHELL", "SYSTEMROOT", "TEMP", "TMP", "USER", "USERNAME", "USERPROFILE",
+        "WINDIR",
     }
 )
+# Receipt validity window for the vault/env exec paths, which impose no child
+# timeout of their own. Consumers validate the receipt at their launch boundary,
+# so the window only has to cover child startup, not the child's whole runtime.
+_RECEIPT_TTL_SECONDS = 3600.0
 _SUITE_CHILD_ENV_ALLOWLIST = frozenset(
     {"LANG", "LC_ALL", "SYSTEMROOT", "TEMP", "TMP", "TZ", "WINDIR"}
 )
@@ -287,34 +294,85 @@ class E2eProvider:
         )
 
 
-def _inject_var(field: str, mapping: object) -> str:
-    """Env var name for a resolved field: an explicit mapping wins, else FIELD."""
+def _inject_var(field: str, mapping: object, prefix: object = None) -> str:
+    """Env var name for a resolved field.
+
+    Precedence: an explicit `inject` mapping entry, else `env_prefix` (WI-010:
+    `env_prefix = "HYPERV_CONTROL"` names the field `HYPERV_CONTROL_USERNAME`),
+    else the bare FIELD name.
+    """
     if isinstance(mapping, dict):
         override = mapping.get(field)
         if isinstance(override, str) and override:
             return override
+    if isinstance(prefix, str) and prefix:
+        return f"{prefix}_{field.upper()}"
     return field.upper()
 
 
+def _declares_naming(cap: Capability) -> bool:
+    """True when the capability declares its child-env names (WI-010).
+
+    A declared naming contract opts the capability into the strict injection
+    path: validated names, collision refusal, and a checkout receipt. Bare
+    capabilities keep the historical overwrite semantics.
+    """
+    mapping = cap.options.get("inject")
+    prefix = cap.options.get("env_prefix")
+    return (isinstance(mapping, dict) and bool(mapping)) or (
+        isinstance(prefix, str) and bool(prefix)
+    )
+
+
+def _declared_fields(cap: Capability) -> list[str]:
+    """The capability's secret field names, without resolving any value.
+
+    Mirrors the fail-closed selection `CredProvider._resolve` performs, so an
+    injection plan can be validated before any backend is contacted.
+    """
+    if source_kind(cap) is SecretSourceKind.ENV:
+        return [str(cap.options.get("field", "password"))]
+    fields_opt = cap.options.get("fields")
+    if isinstance(fields_opt, list) and fields_opt:
+        return [str(f) for f in fields_opt]
+    field_opt = cap.options.get("field")
+    if isinstance(field_opt, str) and field_opt:
+        return [field_opt]
+    raise SecretSourceConfigError(
+        f"{cap.id}: field selection required — set options.field or "
+        f"options.fields (an explicit list of secret keys to inject)"
+    )
+
+
 def _injection_plan(
-    cap: Capability, fields: list[str], *, mapping: object | None = None
+    cap: Capability,
+    fields: list[str],
+    *,
+    mapping: object | None = None,
+    used: set[str] | None = None,
+    inherited: set[str] | None = None,
 ) -> dict[str, str]:
     """Validate field->child-env wiring before any child is launched.
 
     Existing inherited variables are never silently clobbered. Environment
     names required for process/runtime operation are refused even if absent.
+    A caller composing several capabilities passes shared `used`/`inherited`
+    sets so collisions are refused across the whole checkout, not per plan.
     """
     selected = cap.options.get("inject") if mapping is None else mapping
+    prefix = cap.options.get("env_prefix")
     plan: dict[str, str] = {}
-    inherited = {name.upper() for name in os.environ}
+    if inherited is None:
+        inherited = {name.upper() for name in os.environ}
     if "ACB_CHECKOUT_RECEIPT" in inherited:
         raise SecretSourceConfigError(
             f"{cap.id}: inherited ACB_CHECKOUT_RECEIPT is refused; nested checkout "
             "inheritance is not supported"
         )
-    used: set[str] = set()
+    if used is None:
+        used = set()
     for field in fields:
-        var = _inject_var(field, selected)
+        var = _inject_var(field, selected, prefix)
         if not _ENV_NAME.fullmatch(var):
             raise SecretSourceConfigError(
                 f"{cap.id}: inject target for field {field!r} is not a valid environment name"
@@ -354,15 +412,19 @@ def _suite_child_env(plan: dict[str, str], fields: list[str]) -> dict[str, str]:
 
 
 def _checkout_receipt(
-    cap: Capability,
-    field_env: dict[str, str],
+    checkouts: list[tuple[str, dict[str, str]]],
     *,
     invocation_id: str,
-    timeout_seconds: float,
+    ttl_seconds: float,
 ) -> str:
-    """Return value-free launch correlation metadata for the qualified child."""
+    """Return value-free launch correlation metadata for the qualified child.
+
+    `checkouts` is (capability_id, field->env-name plan) per capability, in
+    checkout order — one envelope covers the whole composed checkout
+    (`acb.checkout-receipt.v1`, the shape the evidence-lab boundary validates).
+    """
     issued = datetime.now(UTC)
-    expires = issued + timedelta(seconds=timeout_seconds)
+    expires = issued + timedelta(seconds=ttl_seconds)
     issued_text = issued.isoformat().replace("+00:00", "Z")
     expires_text = expires.isoformat().replace("+00:00", "Z")
     return json.dumps(
@@ -373,14 +435,102 @@ def _checkout_receipt(
             "expires_at": expires_text,
             "checkouts": [
                 {
-                    "capability_id": cap.id,
-                    "fields": {field: field_env[field] for field in sorted(field_env)},
+                    "capability_id": capability_id,
+                    "fields": {field: plan[field] for field in sorted(plan)},
                 }
+                for capability_id, plan in checkouts
             ],
         },
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _exec_checkout(
+    caps: list[Capability],
+    argv: list[str],
+    resolve: Callable[[Capability], dict[str, str]],
+) -> int:
+    """Strict vault/env checkout for one or more capabilities (WI-010).
+
+    Every capability's field->env plan is validated (valid names, reserved
+    refusal, no collision across the whole checkout, no inherited clobber)
+    before any secret is resolved. The child inherits the parent environment
+    plus the injected names and a single `acb.checkout-receipt.v1` covering
+    every capability. No child timeout is imposed (matches the bare path;
+    the suite source remains the bounded/contained mode).
+    """
+    inherited = {name.upper() for name in os.environ}
+    used: set[str] = set()
+    plans: list[tuple[str, dict[str, str]]] = []
+    for cap in caps:
+        plan = _injection_plan(
+            cap, _declared_fields(cap), used=used, inherited=inherited
+        )
+        plans.append((cap.id, plan))
+
+    invocation_id = uuid.uuid4().hex
+    all_vars = sorted(var for _, plan in plans for var in plan.values())
+    checkout_id = "+".join(cap.id for cap in caps)
+    action = Action(
+        checkout_id,
+        "local",
+        "exec",
+        checkout_id,
+        f"injected {all_vars} into child '{argv[0]}' (invocation {invocation_id})",
+    )
+
+    child_env = os.environ.copy()
+    for cap, (_, plan) in zip(caps, plans, strict=True):
+        fields = resolve(cap)
+        if set(fields) != set(plan):
+            raise RuntimeError(
+                f"{cap.id}: resolved fields {sorted(fields)} do not match the "
+                f"declared selection {sorted(plan)}"
+            )
+        for field, value in fields.items():
+            child_env[plan[field]] = value
+    child_env["ACB_CHECKOUT_RECEIPT"] = _checkout_receipt(
+        plans, invocation_id=invocation_id, ttl_seconds=_RECEIPT_TTL_SECONDS
+    )
+
+    result = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
+    provenance.emit(
+        ActionResult(
+            action,
+            "applied" if result.returncode == 0 else "failed",
+            f"child exited {result.returncode}",
+        )
+    )
+    return result.returncode
+
+
+def exec_composed(caps: list[Capability], argv: list[str]) -> int:
+    """Run one command with several cred capabilities checked out at once.
+
+    WI-010: a composed checkout injects every capability's fields under its
+    declared names and emits a single receipt covering all of them — replacing
+    nested `acb exec` shells that re-export values by hand. Only non-suite
+    cred capabilities compose; the suite source keeps its dedicated
+    exact-command trust model.
+    """
+    if not argv:
+        raise ValueError("exec requires a command after '--'")
+    seen: set[str] = set()
+    for cap in caps:
+        if cap.provider != "cred":
+            raise RuntimeError(
+                f"{cap.id}: composed checkout supports only cred capabilities"
+            )
+        if source_kind(cap) is SecretSourceKind.SUITE:
+            raise SecretSourceConfigError(
+                f"{cap.id}: composed checkout does not support source 'suite'"
+            )
+        if cap.id in seen:
+            raise RuntimeError(f"{cap.id}: capability repeated in composed checkout")
+        seen.add(cap.id)
+    provider = CredProvider()
+    return _exec_checkout(caps, argv, provider._resolve)
 
 
 def _windows_taskkill_path() -> str:
@@ -753,12 +903,17 @@ class CredProvider:
 
         source = source_kind(cap)
         if source is not SecretSourceKind.SUITE:
-            # Legacy Vault/env sources keep their established injection,
-            # environment, timeout, and single-provenance behavior.
+            if _declares_naming(cap):
+                # A declared naming contract (inject/env_prefix, WI-010) opts
+                # into the strict path: validated non-colliding names plus a
+                # checkout receipt.
+                return _exec_checkout([cap], argv, self._resolve)
+            # Bare Vault/env capabilities keep their established injection,
+            # environment, timeout, and single-provenance behavior; the child
+            # additionally receives a fresh single-capability receipt.
             legacy_fields = self._resolve(cap)
-            mapping = cap.options.get("inject")
             legacy_plan = {
-                field: _inject_var(field, mapping) for field in legacy_fields
+                field: _inject_var(field, None) for field in legacy_fields
             }
             legacy_env = os.environ.copy()
             injected: list[str] = []
@@ -766,6 +921,11 @@ class CredProvider:
                 var = legacy_plan[field]
                 legacy_env[var] = value
                 injected.append(var)
+            legacy_env["ACB_CHECKOUT_RECEIPT"] = _checkout_receipt(
+                [(cap.id, legacy_plan)],
+                invocation_id=uuid.uuid4().hex,
+                ttl_seconds=_RECEIPT_TTL_SECONDS,
+            )
             action = Action(
                 cap.id,
                 "local",
@@ -817,10 +977,9 @@ class CredProvider:
             for field, value in fields.items():
                 child_env[plan[field]] = value
             child_env["ACB_CHECKOUT_RECEIPT"] = _checkout_receipt(
-                cap,
-                plan,
+                [(cap.id, plan)],
                 invocation_id=invocation_id,
-                timeout_seconds=suite.timeout_seconds,
+                ttl_seconds=suite.timeout_seconds,
             )
             try:
                 result = _run_contained(

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -21,15 +22,17 @@ from .model import (
     KNOWN_HARNESSES,
     Action,
     ActionResult,
+    Capability,
     ManifestError,
     Status,
     Verdict,
     parse_manifest,
     resolve_manifest,
 )
-from .providers import PROVIDERS, adapters
+from .providers import PROVIDERS, adapters, exec_composed
 
 _STABLE_INSTALL_HARNESSES = ("claude", "opencode")
+_CAPABILITY_ID = re.compile(r"^(?:cred|e2e):\S+$")
 
 
 def _inspect_all(manifest_path: Path) -> list[Verdict]:
@@ -326,9 +329,10 @@ def _cmd_exec(args: argparse.Namespace) -> int:
     manifest = args.manifest
 
     # argparse.REMAINDER captures everything after the capability positional,
-    # including -m/--manifest flags that should have been parsed as options.
-    # Extract them so `acb exec <cap> -m manifest.toml -- cmd` works (not just
-    # `acb exec -m manifest.toml <cap> -- cmd`).
+    # including -m/--manifest flags that should have been parsed as options and
+    # any additional capability ids of a composed checkout (WI-010). Extract
+    # both so `acb exec <cap> [<cap>…] -m manifest.toml -- cmd` works.
+    extra_ids: list[str] = []
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -343,10 +347,16 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         if tok == "--":
             del argv[i]
             break
+        if _CAPABILITY_ID.fullmatch(tok):
+            # A capability-shaped token before `--` composes with the first;
+            # anything else stays part of the command for compatibility.
+            extra_ids.append(tok)
+            del argv[i]
+            continue
         i += 1
 
     if not argv:
-        print("error: no command (usage: acb exec <cap> -- <cmd…>)", file=sys.stderr)
+        print("error: no command (usage: acb exec <cap> [<cap>…] -- <cmd…>)", file=sys.stderr)
         return 2
 
     try:
@@ -355,17 +365,29 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    cap = next((c for c in caps if c.id == args.capability), None)
-    if cap is None:
-        print(f"error: capability {args.capability!r} not in manifest", file=sys.stderr)
-        return 2
-    provider = PROVIDERS.get(cap.provider)
+    wanted_ids = [args.capability, *extra_ids]
+    wanted: list[Capability] = []
+    for cap_id in wanted_ids:
+        cap = next((c for c in caps if c.id == cap_id), None)
+        if cap is None:
+            print(f"error: capability {cap_id!r} not in manifest", file=sys.stderr)
+            return 2
+        wanted.append(cap)
+
+    if len(wanted) > 1:
+        try:
+            return exec_composed(wanted, argv)
+        except (RuntimeError, NotImplementedError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    provider = PROVIDERS.get(wanted[0].provider)
     if provider is None:
-        print(f"error: no provider {cap.provider!r}", file=sys.stderr)
+        print(f"error: no provider {wanted[0].provider!r}", file=sys.stderr)
         return 2
 
     try:
-        return provider.exec(cap, argv)
+        return provider.exec(wanted[0], argv)
     except (RuntimeError, NotImplementedError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -609,13 +631,17 @@ def build_parser() -> argparse.ArgumentParser:
     rec.set_defaults(func=_cmd_reconcile)
 
     ex = sub.add_parser(
-        "exec", help="run a command with a capability injected (never surfaced)"
+        "exec", help="run a command with one or more capabilities injected (never surfaced)"
     )
     ex.add_argument(
         "-m", "--manifest", default=None,
         help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
-    ex.add_argument("capability", help="capability id, e.g. cred:svc-bot")
+    ex.add_argument(
+        "capability",
+        help="capability id, e.g. cred:svc-bot; further ids before -- compose "
+        "one checkout with a single receipt",
+    )
     ex.add_argument("argv", nargs=argparse.REMAINDER, help="-- command and args to run")
     ex.set_defaults(func=_cmd_exec)
 
