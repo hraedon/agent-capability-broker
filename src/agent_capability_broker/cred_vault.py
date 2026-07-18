@@ -210,15 +210,13 @@ def resolve(cap: Capability) -> dict[str, str]:
     and defaulting to "all fields" risks over-exposing side-channel material
     (rotation notes, audit IDs, tokens stored alongside the password). Explicit
     selection is the safe default.
-    """
-    try:
-        import hvac
-    except ImportError as exc:
-        raise RuntimeError(
-            "cred source 'vault' needs the [cred] extra: "
-            "pip install 'agent-capability-broker[cred]'"
-        ) from exc
 
+    Config-shape validation runs *before* the optional `hvac` import so a
+    malformed declaration fails fast with a clear `SecretSourceConfigError`
+    even when the `[cred]` extra is not installed (round-3 review: the
+    `_declared_fields`/`resolve` agreement must be observable without the
+    optional dependency).
+    """
     fields_opt = cap.options.get("fields")
     if "fields" in cap.options and not isinstance(fields_opt, list):
         # Config-shape error (round-3 review MINOR 4): raise the same type
@@ -253,6 +251,14 @@ def resolve(cap: Capability) -> dict[str, str]:
     path = cap.options.get("vault")
     if not isinstance(path, str) or not path:
         raise RuntimeError(f"capability {cap.id!r} has no 'vault' path")
+
+    try:
+        import hvac
+    except ImportError as exc:
+        raise RuntimeError(
+            "cred source 'vault' needs the [cred] extra: "
+            "pip install 'agent-capability-broker[cred]'"
+        ) from exc
 
     try:
         client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN"))
