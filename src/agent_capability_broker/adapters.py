@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -64,6 +65,37 @@ def _create_file(path: Path, content: str) -> WriteResult:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return WriteResult(changed=True, backup_path=None)
+
+
+def _remove_shim_file(path: Path, shims_dir: Path) -> WriteResult:
+    """Remove a shim file. Returns changed=False if absent. Removes an empty
+    parent directory (skill-style ``<name>/SKILL.md``) but never the shims dir
+    itself. No backup: removal is the inverse of create-only install."""
+    if not path.exists():
+        return WriteResult(changed=False, backup_path=None)
+    path.unlink()
+    parent = path.parent
+    if parent != shims_dir and parent.is_dir() and not any(parent.iterdir()):
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+    return WriteResult(changed=True, backup_path=None)
+
+
+def _remove_json_server(
+    path: Path, container_key: str, name: str
+) -> WriteResult:
+    """Remove an MCP server entry from a JSON config. Backs up first; no-op if
+    the server is absent (callers check for idempotence)."""
+    data = _load_json(path)
+    container = data.get(container_key)
+    if not isinstance(container, dict) or name not in container:
+        return WriteResult(changed=False, backup_path=None)
+    backup = _backup(path)
+    del container[name]
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return WriteResult(changed=True, backup_path=backup)
 
 
 _REMOTE_TYPES = {"remote", "http", "sse"}
@@ -172,6 +204,22 @@ class ClaudeAdapter:
         overwrite a hand-edited shim); callers guard on `command_shims()`."""
         return _create_file(self.shims_path / name / "SKILL.md", content)
 
+    def shim_path(self, name: str) -> Path:
+        return self.shims_path / name / "SKILL.md"
+
+    def read_shim(self, name: str) -> str | None:
+        try:
+            return self.shim_path(name).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def remove_shim(self, name: str) -> WriteResult:
+        return _remove_shim_file(self.shim_path(name), self.shims_path)
+
+    def remove_mcp_server(self, name: str) -> WriteResult:
+        """Remove an MCP server from Claude's ``mcpServers``. Backup-first."""
+        return _remove_json_server(self.settings_path, "mcpServers", name)
+
 
 class OpencodeAdapter:
     """opencode: `~/.config/opencode/opencode.json` -> `mcp`."""
@@ -243,6 +291,22 @@ class OpencodeAdapter:
         """Render a command shim at `command/<name>.md`. Create-only (refuses to
         overwrite a hand-edited shim); callers guard on `command_shims()`."""
         return _create_file(self.shims_path / f"{name}.md", content)
+
+    def shim_path(self, name: str) -> Path:
+        return self.shims_path / f"{name}.md"
+
+    def read_shim(self, name: str) -> str | None:
+        try:
+            return self.shim_path(name).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def remove_shim(self, name: str) -> WriteResult:
+        return _remove_shim_file(self.shim_path(name), self.shims_path)
+
+    def remove_mcp_server(self, name: str) -> WriteResult:
+        """Remove an MCP server from opencode's ``mcp``. Backup-first."""
+        return _remove_json_server(self.config_path, "mcp", name)
 
 
 class HermesAdapter:
@@ -334,29 +398,71 @@ class HermesAdapter:
         to overwrite a hand-edited shim); callers guard on ``command_shims()``."""
         return _create_file(self.shims_path / name / "SKILL.md", content)
 
+    def shim_path(self, name: str) -> Path:
+        return self.shims_path / name / "SKILL.md"
+
+    def read_shim(self, name: str) -> str | None:
+        try:
+            return self.shim_path(name).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def remove_shim(self, name: str) -> WriteResult:
+        return _remove_shim_file(self.shim_path(name), self.shims_path)
+
+    def remove_mcp_server(self, name: str) -> WriteResult:
+        """Remove an MCP server from Hermes's ``mcp_servers``. Backup-first."""
+        try:
+            import yaml  # noqa: PLC0415 (lazy: needs the [hermes] extra)
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hermes config writes need the [hermes] extra: "
+                "pip install 'agent-capability-broker[hermes]'"
+            ) from exc
+        data = _load_yaml(self.config_path)
+        container = data.get("mcp_servers")
+        if not isinstance(container, dict) or name not in container:
+            return WriteResult(changed=False, backup_path=None)
+        backup = _backup(self.config_path) if self.config_path.exists() else None
+        del container[name]
+        self.config_path.write_text(
+            yaml.dump(data, default_flow_style=False, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+        return WriteResult(changed=True, backup_path=backup)
+
 
 class CodexAdapter:
     """Codex CLI: ``$CODEX_HOME/config.toml`` -> ``[mcp_servers.*]``; skills at
-    ``$CODEX_HOME/skills/<name>/SKILL.md``.
+    ``$HOME/.agents/skills/<name>/SKILL.md``.
 
     Codex uses the same ``SKILL.md`` skill format as Claude Code (YAML
-    frontmatter with ``name:``), discovered under ``skills/``.  Codex's own
-    bundled skills live in a reserved ``skills/.system/`` tree that acb never
-    enumerates or writes.  Config is TOML, read-only here (``mcp_servers``),
-    parsed with the stdlib ``tomllib``.
+    frontmatter with ``name:``), discovered under the user-scoped shared skills
+    tree (suite install-harness contract §2 Codex; ACB Plan 007 Decision 4).
+    Codex's own bundled skills live in a reserved ``.system/`` tree; the
+    user-scoped location keeps shared skills separate from Codex's
+    ``$CODEX_HOME`` config/plugin state.  Config is TOML, read-only here
+    (``mcp_servers``), parsed with the stdlib ``tomllib``.
 
     ``CODEX_HOME`` (Codex's own env var) selects the config root; ``ACB_CODEX_HOME``
-    overrides it for tests/isolation.  This is the component-owned *direct
-    installer* surface (Plan 007): the operator-facing suite path may instead
-    compose these skills into a Codex plugin/marketplace snapshot, which is
-    agent-suite's concern, not acb's.
+    overrides it for tests/isolation.  ``ACB_HOME`` overrides the user home
+    directory that locates the shared ``.agents/skills`` directory; the
+    constructor ``home`` argument wins over the environment.
     """
 
     name = "codex"
 
-    def __init__(self, codex_home: Path | None = None) -> None:
+    def __init__(
+        self,
+        codex_home: Path | None = None,
+        home: Path | None = None,
+        codex_binary: str = "codex",
+    ) -> None:
         env = os.environ.get("ACB_CODEX_HOME") or os.environ.get("CODEX_HOME")
         self.codex_home = codex_home or (Path(env) if env else Path.home() / ".codex")
+        home_env = os.environ.get("ACB_HOME")
+        self.home = home or (Path(home_env) if home_env else Path.home())
+        self.codex_binary = codex_binary
 
     @property
     def config_path(self) -> Path:
@@ -364,8 +470,8 @@ class CodexAdapter:
 
     @property
     def shims_path(self) -> Path:
-        """Where Codex keeps skill shims: ``skills/`` under the config root."""
-        return self.codex_home / "skills"
+        """Where Codex keeps skill shims: ``.agents/skills/`` under the user home."""
+        return self.home / ".agents" / "skills"
 
     @property
     def vault_env_path(self) -> Path:
@@ -378,10 +484,16 @@ class CodexAdapter:
         return self.codex_home / "vault.env"
 
     def available(self) -> bool:
-        """Codex is provisionable iff it has been initialised on this host, i.e.
-        its ``config.toml`` exists.  Mirrors the "config file present" signal the
-        sibling adapters use."""
-        return self.config_path.is_file()
+        """Whether the local Codex harness can participate.
+
+        Shared skills do not require a pre-existing ``config.toml``. A fresh
+        profile is therefore provisionable when the Codex binary is installed;
+        a retained config also keeps read-only inspection available when the
+        binary is temporarily off PATH.
+        """
+        return self.config_path.is_file() or bool(
+            self.codex_binary and shutil.which(self.codex_binary)
+        )
 
     def mcp_servers(self) -> dict[str, McpServer]:
         return _servers_from(_load_toml(self.config_path).get("mcp_servers"))
@@ -407,6 +519,18 @@ class CodexAdapter:
         """Render a skill shim at ``skills/<name>/SKILL.md``.  Create-only (refuses
         to overwrite a hand-edited shim); callers guard on ``command_shims()``."""
         return _create_file(self.shims_path / name / "SKILL.md", content)
+
+    def shim_path(self, name: str) -> Path:
+        return self.shims_path / name / "SKILL.md"
+
+    def read_shim(self, name: str) -> str | None:
+        try:
+            return self.shim_path(name).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def remove_shim(self, name: str) -> WriteResult:
+        return _remove_shim_file(self.shim_path(name), self.shims_path)
 
 
 def _load_toml(path: Path) -> dict[str, object]:

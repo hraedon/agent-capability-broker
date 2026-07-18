@@ -24,7 +24,7 @@ CORE_MODULES = [
 STDLIB_OK = {
     "__future__", "argparse", "ast", "dataclasses", "enum", "functools", "importlib", "json",
     "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing", "datetime",
-    "subprocess", "re", "shutil", "signal", "time", "uuid",
+    "subprocess", "re", "shutil", "signal", "time", "uuid", "hashlib",
     # platformdirs: config-dir portability (not the truth/verdict path) — sole permitted runtime dep
     "platformdirs",
 }

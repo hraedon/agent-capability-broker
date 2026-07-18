@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_capability_broker.adapters import ClaudeAdapter, OpencodeAdapter
+from agent_capability_broker.adapters import ClaudeAdapter, CodexAdapter, OpencodeAdapter
 from agent_capability_broker.cli import _shim_gap, main
 
 
@@ -75,6 +75,7 @@ def _point_env(monkeypatch: pytest.MonkeyPatch, claude_root: Path, oc_root: Path
     # Likewise isolate Codex: an unpopulated CODEX_HOME keeps the host's real
     # ~/.codex out of the parity report (hermetic on any dev box).
     monkeypatch.setenv("ACB_CODEX_HOME", str(oc_root / "codex-home"))
+    monkeypatch.setenv("ACB_HOME", str(oc_root / "user-home"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
@@ -126,3 +127,18 @@ def test_cli_shims_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert rc == 1
     assert payload["gap"] == ["cert-watch-e2e"]
     assert payload["surfaces"]["claude"] == ["start"]
+
+
+def test_codex_shims_path_uses_user_agents_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 007 Decision 4 / suite contract §2: Codex skill shims live in the
+    user-scoped shared skills tree, not under ``$CODEX_HOME``."""
+    monkeypatch.delenv("ACB_HOME", raising=False)
+    monkeypatch.delenv("ACB_CODEX_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert CodexAdapter().shims_path == Path.home() / ".agents" / "skills"
+
+    agents_home = tmp_path / "agents-home"
+    monkeypatch.setenv("ACB_HOME", str(agents_home))
+    assert CodexAdapter().shims_path == agents_home / ".agents" / "skills"

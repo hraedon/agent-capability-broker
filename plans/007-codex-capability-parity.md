@@ -91,6 +91,11 @@ intent and Codex-compatible frontmatter.
 - Existing hand-authored same-name skills are preserved and reported as
   conflicts.
 - Uninstall/rollback behavior follows an ownership manifest and hash checks.
+  **Landed 2026-07-17:** `install-harness --uninstall` removes acb-owned shims
+  and MCP wiring via an exact content match (hash check). A marker-bearing shim
+  whose content has changed is preserved (user edits are never destroyed).
+  Works across all harnesses (claude, opencode, codex, hermes). MCP server
+  removals back up config first; emits provenance.
 
 ### WI-2.2 — Safe MCP server addition
 

@@ -13,6 +13,7 @@ to an exact manifest-qualified command because it remains in the trust boundary.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import provenance
-from .adapters import ClaudeAdapter, CodexAdapter, HermesAdapter, OpencodeAdapter
+from .adapters import ClaudeAdapter, CodexAdapter, HermesAdapter, OpencodeAdapter, WriteResult
 from .model import Action, ActionResult, Capability, McpServer, Status, Verdict
 from .secret_sources import (
     SecretSourceConfigError,
@@ -63,6 +64,9 @@ class HarnessAdapter(Protocol):
     def available(self) -> bool: ...
     def mcp_servers(self) -> dict[str, McpServer]: ...
     def command_shims(self) -> set[str]: ...
+    def shim_path(self, name: str) -> Path: ...
+    def read_shim(self, name: str) -> str | None: ...
+    def remove_shim(self, name: str) -> WriteResult: ...
 
 
 class Provider(Protocol):
@@ -70,6 +74,9 @@ class Provider(Protocol):
 
     def inspect(self, cap: Capability, harness: str, adapter: HarnessAdapter) -> Verdict: ...
     def plan_reconcile(
+        self, cap: Capability, harness: str, adapter: HarnessAdapter
+    ) -> list[Action]: ...
+    def plan_uninstall(
         self, cap: Capability, harness: str, adapter: HarnessAdapter
     ) -> list[Action]: ...
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult: ...
@@ -198,6 +205,17 @@ class E2eProvider:
         if verdict.status in (Status.PRESENT_OK, Status.NOT_APPLICABLE, Status.UNKNOWN):
             return []
 
+        if isinstance(adapter, CodexAdapter):
+            return [Action(
+                cap.id,
+                harness,
+                "manual",
+                cap.id,
+                "Codex e2e/MCP reconciliation is unsupported; existing wiring is "
+                "inspected read-only and never rewritten",
+                payload={"unsupported": True},
+            )]
+
         server = _find_playwright(adapter.mcp_servers())
         # The one case with a safe automatic fix: a wired-but-floating npx launcher.
         if (
@@ -251,6 +269,37 @@ class E2eProvider:
         # No safe automatic fix (e.g. disabled / no browsers while wired): surface it.
         return [Action(cap.id, harness, "manual", cap.id, verdict.detail)]
 
+    def plan_uninstall(
+        self, cap: Capability, harness: str, adapter: HarnessAdapter
+    ) -> list[Action]:
+        """Plan removal of acb-installed e2e MCP wiring. Ownership is proven by
+        matching the server command to what acb would add (the server name is
+        not checked — ``_find_playwright`` finds any server whose command or
+        URL contains 'playwright'). A server that doesn't match (hand-authored,
+        modified, or no pin in manifest) is preserved."""
+        server = _find_playwright(adapter.mcp_servers())
+        if server is None:
+            return []
+        pin = cap.options.get("pin")
+        if not (isinstance(pin, str) and pin):
+            return [Action(
+                cap.id, harness, "manual", server.name,
+                f"manifest has no options.pin for {cap.id}; cannot verify "
+                f"ownership of '{server.name}' — remove manually if needed",
+            )]
+        expected_cmd = ["npx", "-y", f"@playwright/mcp@{pin}", "--headless", "--isolated"]
+        if list(server.command) == expected_cmd:
+            return [Action(
+                cap.id, harness, "remove_mcp", server.name,
+                f"remove acb-installed '{server.name}' MCP server from {harness}",
+                payload={"expected_command": expected_cmd},
+            )]
+        return [Action(
+            cap.id, harness, "manual", server.name,
+            f"'{server.name}' in {harness} does not match acb's expected wiring — "
+            f"not removing (hand-authored or modified); remove manually if needed",
+        )]
+
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
         if action.kind == "manual":
             return ActionResult(action, "skipped", "manual action — no automatic apply")
@@ -276,6 +325,26 @@ class E2eProvider:
             res = adapter.add_mcp_server(action.target, command)
             return ActionResult(
                 action, "applied", f"added '{action.target}' -> {' '.join(command)}",
+                backup_path=str(res.backup_path) if res.backup_path else None,
+            )
+        if action.kind == "remove_mcp":
+            if not isinstance(adapter, ClaudeAdapter | OpencodeAdapter | HermesAdapter):
+                return ActionResult(action, "skipped", "MCP removal not supported for this harness")
+            current = adapter.mcp_servers().get(action.target)
+            if current is None:
+                return ActionResult(action, "skipped", "already absent")
+            expected = action.payload.get("expected_command")
+            if not isinstance(expected, list) or list(current.command) != expected:
+                return ActionResult(
+                    action,
+                    "failed",
+                    "MCP wiring changed after uninstall planning; preserved",
+                )
+            res = adapter.remove_mcp_server(action.target)
+            if not res.changed:
+                return ActionResult(action, "skipped", "already absent")
+            return ActionResult(
+                action, "applied", f"removed '{action.target}' MCP server",
                 backup_path=str(res.backup_path) if res.backup_path else None,
             )
         return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
@@ -523,6 +592,20 @@ def _cred_shim_name(cap: Capability) -> str:
     return cap.id.replace(":", "-")
 
 
+_ACB_MANAGED_MARKER = "<!-- acb:managed-shim -->"
+
+
+def _looks_acb_owned(content: str) -> bool:
+    """Loose ownership check: does this content look like an acb-rendered shim?
+
+    Every shim acb renders carries a unique ``<!-- acb:managed-shim -->`` marker
+    at the end of the body. A hand-authored shim is extremely unlikely to
+    contain this exact comment. Used as a fallback when the exact content hash
+    doesn't match (stale shim after acb upgrade or manifest drift).
+    """
+    return _ACB_MANAGED_MARKER in content
+
+
 def _vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
     """The `.env` file the shim should point `ACB_VAULT_ENV` at.
 
@@ -605,6 +688,8 @@ command; do not invoke a shell, interpreter, or unreviewed wrapper.
 capability is present and the broker reachable; `acb reconcile` (re)renders this shim.
 `acb install-harness {harness}` is the bootstrap step that renders all shims for
 this harness at once.
+
+<!-- acb:managed-shim -->
 """
     if harness in ("claude", "hermes", "codex"):
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
@@ -673,6 +758,26 @@ class CredProvider:
                 f"no '{shim}' shim in {harness}: an agent there can't discover "
                 f"`acb exec {cap.id}`",
             )
+        actual = adapter.read_shim(shim)
+        try:
+            expected = _render_cred_shim(
+                cap, harness, shim, _vault_env_path(cap, adapter)
+            )
+        except Exception:
+            expected = None
+        if actual is None or expected is None or actual != expected:
+            ownership = (
+                "ACB-marked but modified"
+                if actual and _looks_acb_owned(actual)
+                else "not ACB-owned"
+            )
+            return Verdict(
+                cap.id,
+                harness,
+                Status.PRESENT_BROKEN,
+                f"'{shim}' skill name is present but its content is {ownership}; "
+                "preserved as a conflict rather than trusted as capability wiring",
+            )
         status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
         return Verdict(cap.id, harness, status, f"'{shim}' shim present; {detail}")
 
@@ -687,6 +792,28 @@ class CredProvider:
                 f"add a '{shim}' discovery shim to {harness} (surfaces `acb exec {cap.id}`)",
                 payload={"content": content},
             )]
+        actual = adapter.read_shim(shim)
+        try:
+            expected = _render_cred_shim(
+                cap, harness, shim, _vault_env_path(cap, adapter)
+            )
+        except Exception:
+            expected = None
+        if actual is None or expected is None or actual != expected:
+            ownership = (
+                "ACB-marked but modified"
+                if actual and _looks_acb_owned(actual)
+                else "hand-authored"
+            )
+            return [Action(
+                cap.id,
+                harness,
+                "manual",
+                shim,
+                f"'{shim}' already exists with {ownership} content; preserving it "
+                "and refusing to claim capability wiring",
+                payload={"conflict": True},
+            )]
         # Shim present: discoverability is satisfied. An unreachable broker is an
         # infra/auth problem, not something a config write can fix — surface it.
         status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
@@ -697,9 +824,80 @@ class CredProvider:
             )]
         return []
 
+    def plan_uninstall(
+        self, cap: Capability, harness: str, adapter: HarnessAdapter
+    ) -> list[Action]:
+        """Plan removal of acb-owned cred shims. Ownership is proven **only**
+        by an exact content match (hash check): the on-disk content must be
+        byte-for-byte what acb would render today. A marker-bearing shim whose
+        content has changed is **preserved** — the user may have edited it, and
+        acb never destroys user modifications. If the expected content cannot be
+        rendered (e.g. invalid source config), the shim is also preserved."""
+        shim = _cred_shim_name(cap)
+        if shim not in adapter.command_shims():
+            return []
+        actual = adapter.read_shim(shim)
+        if actual is None:
+            return []
+        try:
+            expected = _render_cred_shim(
+                cap, harness, shim, _vault_env_path(cap, adapter)
+            )
+        except Exception:
+            expected = None
+        if expected is not None and actual == expected:
+            return [Action(
+                cap.id, harness, "remove_cred_shim", shim,
+                f"remove acb-owned '{shim}' discovery shim from {harness}",
+                payload={
+                    "expected_sha256": hashlib.sha256(actual.encode("utf-8")).hexdigest()
+                },
+            )]
+        if _looks_acb_owned(actual):
+            # An acb-owned artifact (carries our marker) that we cannot safely
+            # remove is a *conflict*: the uninstall did not complete, and the
+            # caller must not read it as clean success. Flagged so the CLI fails
+            # closed with a non-zero exit.
+            return [Action(
+                cap.id, harness, "manual", shim,
+                f"'{shim}' in {harness} carries the acb marker but content has "
+                f"changed — not removing (user-modified); remove manually if needed",
+                payload={"conflict": True},
+            )]
+        # No acb marker and no content match: acb never owned this artifact, so
+        # there is nothing of ours to remove. Surfaced as a manual note, but the
+        # uninstall of acb-owned state is complete.
+        return [Action(
+            cap.id, harness, "manual", shim,
+            f"'{shim}' in {harness} does not match acb's expected content and "
+            f"lacks acb ownership marker — not removing (hand-authored); "
+            f"remove manually if needed",
+        )]
+
     def apply(self, action: Action, adapter: HarnessAdapter) -> ActionResult:
         if action.kind == "manual":
             return ActionResult(action, "skipped", "manual action — no automatic apply")
+        if action.kind == "remove_cred_shim":
+            if action.target not in adapter.command_shims():
+                return ActionResult(action, "skipped", "shim already absent")
+            actual = adapter.read_shim(action.target)
+            expected_sha256 = action.payload.get("expected_sha256")
+            if (
+                actual is None
+                or not isinstance(expected_sha256, str)
+                or hashlib.sha256(actual.encode("utf-8")).hexdigest() != expected_sha256
+            ):
+                return ActionResult(
+                    action,
+                    "failed",
+                    "shim changed after uninstall planning; preserved",
+                )
+            res = adapter.remove_shim(action.target)
+            if not res.changed:
+                return ActionResult(action, "skipped", "shim already absent")
+            return ActionResult(
+                action, "applied", f"removed '{action.target}' discovery shim",
+            )
         if action.kind != "add_cred_shim":
             return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
         if action.target in adapter.command_shims():

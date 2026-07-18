@@ -153,11 +153,12 @@ def _run_doctor_json(manifest: Path) -> tuple[dict, int]:
 def test_doctor_json_healthy_classifies_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = _harness_env(tmp_path, monkeypatch, opencode_present=True)
-    (root / "command").mkdir()
-    (root / "command" / "cred-svc-bot.md").write_text("# shim\n", encoding="utf-8")
+    _harness_env(tmp_path, monkeypatch, opencode_present=True)
     monkeypatch.setenv("ACB_T", "set")
     manifest = _env_manifest(tmp_path)
+
+    with redirect_stdout(io.StringIO()):
+        assert main(["install-harness", "opencode", "-m", str(manifest)]) == 0
 
     payload, rc = _run_doctor_json(manifest)
 

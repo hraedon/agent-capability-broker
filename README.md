@@ -54,12 +54,13 @@ and reconciles reality to it.
   `e2e` (Playwright/browser provisioning, local or remote backend) are the first
   two. Adding a provider is the extension point.
 - **Harness adapters** that read and render each harness's wiring (Claude Code
-  `settings.json` + skills; opencode `opencode.json` MCP/commands). `codex` is
-  recognized by the closed suite contract but currently returns explicit,
-  non-zero `unsupported` from `install-harness` until Plan 007 lands. Hermes
-  remains an explicit component-private target. Direct `install-harness all`
-  expands only the currently supported public set (Claude + OpenCode); Codex is
-  promoted atomically after its adapter and conformance proof land.
+  `settings.json` + skills; opencode `opencode.json` MCP/commands). `codex`
+  installs credential-discovery skills under `$HOME/.agents/skills` and ships a
+  value-free component plugin under `plugins/acb`; Codex e2e/MCP writes remain
+  explicitly unsupported. Hermes remains an explicit component-private target.
+  Direct `install-harness all` expands only the currently supported public set
+  (Claude + OpenCode); Codex is promoted atomically after the remaining
+  credentialed invocation proof lands.
 - `doctor` (read-only parity report), `reconcile` (generate wiring, dry-run by
   default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
   (bootstrap: provision one harness from the manifest + verify), `shims`

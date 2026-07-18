@@ -91,12 +91,13 @@ probe" rule applied to the read path.
 
 ## 5. Provider interface
 
-A provider is the unit of extension. It implements four operations; the first two
-are read-only, the last two act.
+A provider is the unit of extension. It implements five operations; the first
+three are read-only, the last two act.
 
 ```
 inspect(cap, harness, adapter)        -> Status        # read-only
 plan_reconcile(cap, harness, adapter) -> list[Action]  # read-only (dry-run plan)
+plan_uninstall(cap, harness, adapter)  -> list[Action]  # read-only (dry-run plan)
 apply(action)                         -> ActionResult  # MUTATES; emits provenance
 exec(cap, argv)                       -> int           # injects secret; emits provenance
 ```
@@ -106,6 +107,10 @@ exec(cap, argv)                       -> int           # injects secret; emits p
 - `plan_reconcile` returns the ordered `Action`s that would move a capability
   from its current status toward `PRESENT_OK` — *without performing them*. This is
   what `acb reconcile` prints by default.
+- `plan_uninstall` returns the `Action`s that would remove acb-owned artifacts
+  (shims, MCP wiring) from a harness — *without performing them*. Ownership is
+  proven by a two-tier check: exact content match, or the `<!-- acb:managed-shim -->`
+  marker for stale shims. This is what `acb install-harness --uninstall` uses.
 - `apply` performs one `Action`. Only reached under `--apply`. Backs up any
   config it writes, is idempotent, never overwrites an existing secret, and emits
   a provenance event.
@@ -143,15 +148,34 @@ First two providers:
 The closed manifest set recognizes `claude`, `opencode`, `codex`, and the
 component-private `hermes` target. The Codex adapter (`CodexAdapter`, Plan 008
 WI-3.1) is implemented for the cred provider: `acb install-harness codex`
-renders `cred:<id>` discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md`
-(Codex's own `SKILL.md` format), create-only and preserving the user's config
-and existing skills (including the reserved `.system` tree). The Codex e2e/MCP
+renders `cred:<id>` discovery skills into `$HOME/.agents/skills/<name>/SKILL.md`
+(Codex's own `SKILL.md` format in the user-scoped shared skills tree),
+create-only and preserving the user's config and existing skills (including the
+reserved `.system` tree). The Codex e2e/MCP
 write path is honestly `unsupported` (a named skip), not a false green.
+`plugins/acb` is the component-owned static Codex plugin: it contains only a
+generic, value-free broker skill and intentionally does not duplicate the
+manifest-generated `cred-*` skills. Agent-suite remains responsible for
+publishing and pinning that component asset in its composed marketplace.
 `acb install-harness all` still expands only to the currently supported public
 adapters, Claude and OpenCode: Codex joins `all` atomically after its live
 interop proof (Plan 007 WI-3.1), not merely because its adapter exists. A
 supported `--dry-run` exits 2 and keeps the same result schema; the aggregate is
 a no-op only when both concrete records are installed no-ops.
+
+`acb install-harness <harness> --uninstall` is the inverse of install: it
+removes acb-owned shims and MCP wiring using an exact content match (hash
+check) — the on-disk content must be byte-for-byte what acb would render
+today, and the digest/command is checked again immediately before deletion. A
+marker-bearing shim whose content has changed is **preserved** (the
+user may have edited it; acb never destroys user modifications). MCP server
+removals use an exact command match and back up the config first; shim removals
+do not back up (shims are regenerable). `--uninstall` follows the same
+`--dry-run`, `--json`, `all` expansion, and provenance emission contract as
+install. A preserved modified ACB artifact is a conflict, represented inside
+the suite's closed result vocabulary as `status = "failed"` with
+`conflict = true` and per-action conflict detail; `conflict` is never emitted
+as a top-level status.
 
 An adapter encapsulates one harness's config format and capability surface:
 
@@ -167,7 +191,7 @@ exposed_tools()      -> set[str]              # what the harness currently adver
 - **opencode** — reads `~/.config/opencode/opencode.json` (`mcp` blocks,
   `command` shims).
 - **codex** — reads `$CODEX_HOME/config.toml` (`[mcp_servers.*]`, via stdlib
-  `tomllib`) and `$CODEX_HOME/skills/<name>/SKILL.md` skills; writes cred
+  `tomllib`) and `$HOME/.agents/skills/<name>/SKILL.md` skills; writes cred
   discovery skills only (create-only), never Codex config, auth, or the
   `.system` skill tree.
 

@@ -1,0 +1,31 @@
+{
+  "name": "acb",
+  "version": "0.1.0",
+  "description": "Inspect and invoke brokered agent capabilities without putting credentials in Codex configuration or context.",
+  "author": {
+    "name": "hraedon"
+  },
+  "repository": "https://github.com/hraedon/agent-capability-broker",
+  "license": "MIT",
+  "keywords": [
+    "capabilities",
+    "credentials",
+    "security"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Capability Broker",
+    "shortDescription": "Use brokered capabilities without surfacing secrets.",
+    "longDescription": "Adds value-free guidance for inspecting Agent Capability Broker health and invoking pre-qualified capability commands. Capability-specific skills remain generated from the local manifest.",
+    "developerName": "hraedon",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Check whether my declared agent capabilities are ready.",
+      "Help me use a pre-qualified brokered capability safely."
+    ]
+  }
+}

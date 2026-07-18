@@ -31,6 +31,14 @@ def _opencode(root: Path, *, shims: list[str] | None = None) -> OpencodeAdapter:
     return OpencodeAdapter(config_path=root / "opencode.json")
 
 
+def _write_owned_shim(adapter: OpencodeAdapter, cap: Capability) -> None:
+    shim = _cred_shim_name(cap)
+    adapter.write_command_shim(
+        shim,
+        _render_cred_shim(cap, "opencode", shim, adapter.vault_env_path),
+    )
+
+
 # --- naming ----------------------------------------------------------------
 
 def test_shim_name_default_and_override() -> None:
@@ -52,7 +60,8 @@ def test_inspect_present_ok_when_shim_and_broker_reachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: True)
-    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, VAULT_CAP)
     v = CredProvider().inspect(VAULT_CAP, "opencode", adapter)
     assert v.status is Status.PRESENT_OK
     assert "shim present" in v.detail
@@ -62,7 +71,8 @@ def test_inspect_present_broken_when_shim_but_broker_unreachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: False)
-    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, VAULT_CAP)
     v = CredProvider().inspect(VAULT_CAP, "opencode", adapter)
     assert v.status is Status.PRESENT_BROKEN
 
@@ -74,7 +84,8 @@ def test_inspect_unknown_when_reachability_uncheckable(
         raise RuntimeError("no [cred] extra")
 
     monkeypatch.setattr(cred_vault, "reachable", _boom)
-    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, VAULT_CAP)
     v = CredProvider().inspect(VAULT_CAP, "opencode", adapter)
     assert v.status is Status.UNKNOWN
     assert "not checked" in v.detail
@@ -82,7 +93,8 @@ def test_inspect_unknown_when_reachability_uncheckable(
 
 def test_inspect_env_source_reachability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cap = Capability("cred:db", "cred", ("opencode",), {"source": "env", "from_env": "ACB_T"})
-    adapter = _opencode(tmp_path, shims=["cred-db"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, cap)
     monkeypatch.delenv("ACB_T", raising=False)
     assert CredProvider().inspect(cap, "opencode", adapter).status is Status.PRESENT_BROKEN
     monkeypatch.setenv("ACB_T", "x")
@@ -104,11 +116,16 @@ def test_inspect_probes_per_capability_vault_env_plane(
         return True
 
     monkeypatch.setattr(cred_vault, "reachable", _capture)
-    adapter = _opencode(tmp_path, shims=["cred-ldap-bind"])
     cap = Capability(
         "cred:ldap-bind", "cred", ("opencode",),
         {"vault": "kv/cert-watch/ldap/bind", "field": "password",
          "vault_env": "cert-watch.env"},
+    )
+    adapter = _opencode(tmp_path)
+    shim = _cred_shim_name(cap)
+    adapter.write_command_shim(
+        shim,
+        _render_cred_shim(cap, "opencode", shim, adapter.vault_env_path.parent / "cert-watch.env"),
     )
     v = CredProvider().inspect(cap, "opencode", adapter)
     assert v.status is Status.PRESENT_OK
@@ -123,7 +140,8 @@ def test_inspect_probes_default_plane_without_override(
         cred_vault, "reachable",
         lambda cap, *, vault_env=None: seen.setdefault("vault_env", vault_env) or True,
     )
-    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, VAULT_CAP)
     CredProvider().inspect(VAULT_CAP, "opencode", adapter)
     assert seen["vault_env"] == adapter.vault_env_path  # adapter default, no override
 
@@ -209,13 +227,15 @@ def test_plan_renders_per_capability_vault_env(tmp_path: Path) -> None:
 
 def test_plan_present_ok_is_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: True)
-    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, VAULT_CAP)
     assert CredProvider().plan_reconcile(VAULT_CAP, "opencode", adapter) == []
 
 
 def test_plan_broken_broker_is_manual(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cred_vault, "reachable", lambda cap, **_: False)
-    adapter = _opencode(tmp_path, shims=["cred-svc-bot"])
+    adapter = _opencode(tmp_path)
+    _write_owned_shim(adapter, VAULT_CAP)
     plan = CredProvider().plan_reconcile(VAULT_CAP, "opencode", adapter)
     assert plan[0].kind == "manual" and "unreachable" in plan[0].summary
 

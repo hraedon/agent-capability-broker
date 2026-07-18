@@ -222,10 +222,12 @@ entry that invokes `acb exec cred:<id> -- <command>`. It must not offer a
 `get`, print, inspect-value, or copy-to-clipboard workflow to the model.
 
 **AC:** install, rerun, conflict, trust, disable, and uninstall behavior passes
-against an isolated `CODEX_HOME`; user skills/plugins/config are preserved.
+against an isolated `CODEX_HOME` and `ACB_HOME`; user skills/plugins/config are
+preserved.
 
-**Landed 2026-07-17 (adapter half).** `CodexAdapter` (`src/…/adapters.py`)
-renders cred discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md` in
+**Landed 2026-07-18 (adapter and component-plugin slice).** `CodexAdapter`
+(`src/…/adapters.py`)
+renders cred discovery skills into `$HOME/.agents/skills/<name>/SKILL.md` in
 Codex's own `SKILL.md` format (verified byte-shape-identical to Codex's bundled
 `.system` skills), create-only and backup-first. `install-harness codex` now
 flows the normal plan/apply/verify path (the hard-coded `unsupported` block is
@@ -234,18 +236,25 @@ surface pattern — no get/print/inspect/clipboard, no secret value (canary test
 `CODEX_HOME`/`ACB_CODEX_HOME` select the root; the reserved `.system` tree is
 never enumerated or written. Verified against an isolated `CODEX_HOME` via the
 real CLI **and** unit tests (install, dry-run, rerun-no-op, hand-edited-shim
-conflict → preserved, user config/skills preserved, `all` excludes codex). Codex
-stays out of the stable `all` expansion until WI-3.2's live proof.
+conflict → preserved/fail-closed, user config/skills preserved, `all` excludes
+codex). A real `codex debug prompt-input` proof now confirms that a generated
+skill under an isolated `$HOME/.agents/skills` is model-visible without a model
+call or user authentication. `plugins/acb` owns the static plugin manifest and
+a generic value-free broker skill; a real isolated marketplace test proves
+plugin add/list/remove. It contains no capability identifiers or secret refs,
+so dynamic `cred-*` skills remain generated from the local manifest. Codex
+stays out of the stable `all` expansion until WI-3.2's credentialed invocation
+proof.
 
-Remaining for WI-3.1: (a) *live* Codex in-session discovery/invocation of the
-shim is Plan 007 WI-3.1's billable interop proof, not asserted here; (b) the
-Codex **plugin/marketplace** composition (`.codex-plugin/plugin.json` +
-`codex plugin add`) is agent-suite's suite-level distribution concern (Plan 007
-WI-0.1), not acb's — acb owns the direct-installer skill surface; (c) *trust*
-does not apply to skills (only hooks/MCP need `/hooks` trust) and generic
-*uninstall/disable* is a pre-existing cross-harness gap (acb has no uninstall for
-claude/opencode either), so it is deferred as a suite-wide WI, not a codex-only
-one — recorded rather than faked green.
+Remaining for WI-3.1: (a) *live credentialed invocation* of the shim is Plan
+007 WI-3.1's interop proof, not asserted here; (b) publishing/pinning the
+component-owned plugin in the suite **marketplace** remains agent-suite's
+composition concern (Plan 007 WI-0.1); (c) *trust*
+does not apply to skills (only hooks/MCP need `/hooks` trust) and
+*uninstall/disable* is now implemented as a cross-harness `install-harness
+--uninstall` surface (exact content match hash check; marker-bearing shims with
+changed content are preserved — user edits are never destroyed; MCP removals
+backup-first; provenance-emitting).
 
 ### WI-3.2 — Windows evidence-lab proof
 

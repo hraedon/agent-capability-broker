@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import agent_capability_broker.adapters as adapters_module
 from agent_capability_broker.cli import main
 
 
@@ -114,29 +115,33 @@ def _setup_codex(
     *,
     user_skills: list[str] | None = None,
 ) -> Path:
-    """Isolated CODEX_HOME with an initialised ``config.toml`` (so the adapter is
-    ``available()``) plus optional pre-existing user skills and a reserved
-    ``.system`` skill acb must neither enumerate nor touch."""
-    home = tmp_path / "codex-home"
-    (home / "skills").mkdir(parents=True)
-    (home / "config.toml").write_text(
+    """Isolated ``CODEX_HOME`` and ``ACB_HOME``.
+
+    Both are pointed at ``codex_home`` for isolation; user-scoped skills therefore
+    resolve to ``codex_home/.agents/skills``.
+    """
+    codex_home = tmp_path / "codex-home"
+    skills_home = codex_home / ".agents" / "skills"
+    skills_home.mkdir(parents=True)
+    (codex_home / "config.toml").write_text(
         'model = "gpt-5.6"\n\n[mcp_servers.hindsight]\nurl = "https://example/mcp"\n',
         encoding="utf-8",
     )
     # Codex's own bundled skills live under .system — acb must ignore this tree.
-    sysskill = home / "skills" / ".system" / "imagegen"
+    sysskill = skills_home / ".system" / "imagegen"
     sysskill.mkdir(parents=True)
     (sysskill / "SKILL.md").write_text("---\nname: imagegen\n---\n", encoding="utf-8")
     for name in user_skills or []:
-        d = home / "skills" / name
+        d = skills_home / name
         d.mkdir()
         (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n# user's own\n", encoding="utf-8")
-    monkeypatch.setenv("ACB_CODEX_HOME", str(home))
+    monkeypatch.setenv("ACB_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("ACB_HOME", str(codex_home))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(tmp_path / "no-oc.json"))
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
-    return home
+    return codex_home
 
 
 def _codex_cred_manifest(tmp_path: Path) -> Path:
@@ -165,7 +170,7 @@ def test_install_harness_codex_creates_skill_shim(
     assert payload["harness"] == "codex"
     assert payload["status"] == "installed"
 
-    shim = home / "skills" / "cred-svc-bot" / "SKILL.md"
+    shim = home / ".agents" / "skills" / "cred-svc-bot" / "SKILL.md"
     assert shim.is_file()
     body = shim.read_text(encoding="utf-8")
     # Codex skills need a `name:` in frontmatter, same as Claude Code.
@@ -175,6 +180,90 @@ def test_install_harness_codex_creates_skill_shim(
     assert "p@ss-not-leaked" not in body
     for banned in ("acb get", "print the", "inspect-value", "clipboard"):
         assert banned not in body.lower()
+
+
+def test_install_harness_codex_fresh_profile_needs_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shared Codex skills can be installed before config.toml is created."""
+    home = tmp_path / "fresh-home"
+    codex_home = tmp_path / "fresh-codex"
+    monkeypatch.setenv("ACB_HOME", str(home))
+    monkeypatch.setenv("ACB_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ACB_TEST_SECRET", "synthetic")
+    monkeypatch.setattr(adapters_module.shutil, "which", lambda _name: "/bin/codex")
+    manifest = _codex_cred_manifest(tmp_path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(["install-harness", "codex", "-m", str(manifest), "--json"])
+
+    assert rc == 0
+    assert not (codex_home / "config.toml").exists()
+    assert (home / ".agents" / "skills" / "cred-svc-bot" / "SKILL.md").is_file()
+    assert json.loads(buf.getvalue())["status"] == "installed"
+
+
+def test_install_harness_codex_unavailable_dry_run_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "fresh-home"
+    monkeypatch.setenv("ACB_HOME", str(home))
+    monkeypatch.setenv("ACB_CODEX_HOME", str(tmp_path / "missing-codex"))
+    monkeypatch.setattr(adapters_module.shutil, "which", lambda _name: None)
+    manifest = _codex_cred_manifest(tmp_path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(
+            [
+                "install-harness",
+                "codex",
+                "-m",
+                str(manifest),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert rc == 2
+    payload = json.loads(buf.getvalue())
+    assert payload["status"] == "failed"
+    assert payload["no_op"] is False
+    assert payload["checks"][0]["status"] == "unknown"
+
+
+def test_install_harness_codex_e2e_dry_run_is_honestly_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_codex(tmp_path, monkeypatch)
+    manifest = tmp_path / "e2e.toml"
+    manifest.write_text(
+        '[capability."e2e:chromium"]\nprovider="e2e"\n'
+        'pin="1.43.0"\nharnesses=["codex"]\n',
+        encoding="utf-8",
+    )
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(
+            [
+                "install-harness",
+                "codex",
+                "-m",
+                str(manifest),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert rc == 2
+    payload = json.loads(buf.getvalue())
+    assert payload["status"] == "failed"
+    assert payload["no_op"] is False
+    assert payload["actions"][0]["kind"] == "manual"
+    assert "unsupported" in payload["actions"][0]["detail"].lower()
 
 
 def test_install_harness_codex_dry_run_writes_nothing(
@@ -188,7 +277,7 @@ def test_install_harness_codex_dry_run_writes_nothing(
         rc = main(["install-harness", "codex", "-m", str(manifest), "--dry-run"])
 
     assert rc == 2
-    assert not (home / "skills" / "cred-svc-bot" / "SKILL.md").exists()
+    assert not (home / ".agents" / "skills" / "cred-svc-bot" / "SKILL.md").exists()
 
 
 def test_install_harness_codex_rerun_is_noop(
@@ -215,9 +304,10 @@ def test_install_harness_codex_preserves_user_skills_and_config(
     home = _setup_codex(tmp_path, monkeypatch, user_skills=["my-notes"])
     monkeypatch.setenv("ACB_TEST_SECRET", "x")
     manifest = _codex_cred_manifest(tmp_path)
+    skills_root = home / ".agents" / "skills"
     config_before = (home / "config.toml").read_text(encoding="utf-8")
-    user_before = (home / "skills" / "my-notes" / "SKILL.md").read_text(encoding="utf-8")
-    sys_before = (home / "skills" / ".system" / "imagegen" / "SKILL.md").read_text(encoding="utf-8")
+    user_before = (skills_root / "my-notes" / "SKILL.md").read_text(encoding="utf-8")
+    sys_before = (skills_root / ".system" / "imagegen" / "SKILL.md").read_text(encoding="utf-8")
 
     with redirect_stdout(io.StringIO()):
         rc = main(["install-harness", "codex", "-m", str(manifest)])
@@ -225,9 +315,9 @@ def test_install_harness_codex_preserves_user_skills_and_config(
     assert rc == 0
     # acb never touches Codex config, the user's own skill, or the .system tree.
     assert (home / "config.toml").read_text(encoding="utf-8") == config_before
-    assert (home / "skills" / "my-notes" / "SKILL.md").read_text(encoding="utf-8") == user_before
+    assert (skills_root / "my-notes" / "SKILL.md").read_text(encoding="utf-8") == user_before
     assert (
-        home / "skills" / ".system" / "imagegen" / "SKILL.md"
+        skills_root / ".system" / "imagegen" / "SKILL.md"
     ).read_text(encoding="utf-8") == sys_before
 
 
@@ -239,15 +329,20 @@ def test_install_harness_codex_refuses_to_clobber_hand_edited_shim(
     home = _setup_codex(tmp_path, monkeypatch, user_skills=["cred-svc-bot"])
     monkeypatch.setenv("ACB_TEST_SECRET", "x")
     manifest = _codex_cred_manifest(tmp_path)
-    before = (home / "skills" / "cred-svc-bot" / "SKILL.md").read_text(encoding="utf-8")
+    shim = home / ".agents" / "skills" / "cred-svc-bot" / "SKILL.md"
+    before = shim.read_text(encoding="utf-8")
 
     buf = io.StringIO()
     with redirect_stdout(buf):
         rc = main(["install-harness", "codex", "-m", str(manifest), "--json"])
 
-    assert rc == 0
-    assert (home / "skills" / "cred-svc-bot" / "SKILL.md").read_text(encoding="utf-8") == before
-    assert json.loads(buf.getvalue())["no_op"] is True
+    assert rc == 1
+    assert shim.read_text(encoding="utf-8") == before
+    payload = json.loads(buf.getvalue())
+    assert payload["status"] == "failed"
+    assert payload["no_op"] is False
+    assert payload["actions"][0]["kind"] == "manual"
+    assert payload["checks"][0]["status"] == "present_broken"
 
 
 def test_install_harness_all_excludes_codex(
@@ -266,7 +361,7 @@ def test_install_harness_all_excludes_codex(
     payload = json.loads(buf.getvalue())
     targeted = {r["harness"] for r in payload["results"]}
     assert "codex" not in targeted
-    assert not (home / "skills" / "cred-svc-bot").exists()
+    assert not (home / ".agents" / "skills" / "cred-svc-bot").exists()
 
 
 def test_install_harness_json_reports_installed(
@@ -410,9 +505,12 @@ def test_install_harness_provisioned_harness_dry_run_is_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--dry-run on a fully-provisioned harness reports nothing to install."""
-    _setup_oc(tmp_path, monkeypatch, shims=["cred-svc-bot"])
+    _setup_oc(tmp_path, monkeypatch)
     monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
     manifest = _cred_manifest(tmp_path)
+
+    with redirect_stdout(io.StringIO()):
+        assert main(["install-harness", "opencode", "-m", str(manifest)]) == 0
 
     buf = io.StringIO()
     with redirect_stdout(buf):

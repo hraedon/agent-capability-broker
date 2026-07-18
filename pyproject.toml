@@ -52,6 +52,13 @@ hermes = [
 # Optional narration layer, kept out of the truth path. Empty placeholder.
 narration = []
 
+[tool.uv.sources]
+# Regista is a suite sibling and is not published under the suite's version on
+# PyPI (the registry name currently resolves to an unrelated 0.0.0 package).
+# Keep local development and clean `uv run --extra suite-secrets` checks bound
+# to the public facade implementation this component is designed against.
+regista = { path = "../regista", editable = true }
+
 [project.urls]
 Source = "https://github.com/hraedon/agent-capability-broker"
 Issues = "https://github.com/hraedon/agent-capability-broker/issues"

@@ -268,6 +268,24 @@ def _inspect_for_harness(manifest_path: Path, harness: str) -> list[Verdict]:
     return verdicts
 
 
+def _uninstall_plan_for_harness(manifest_path: Path, harness: str) -> list[Action]:
+    """Collect uninstall actions for one harness."""
+    caps = parse_manifest(manifest_path)
+    harness_adapters = adapters()
+    plan: list[Action] = []
+    adapter = harness_adapters.get(harness)
+    for cap in caps:
+        if harness not in cap.harnesses:
+            continue
+        provider = PROVIDERS.get(cap.provider)
+        if provider is None:
+            continue
+        if adapter is None or not adapter.available():
+            continue
+        plan.extend(provider.plan_uninstall(cap, harness, adapter))
+    return plan
+
+
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     try:
         plan = _plan_all(resolve_manifest(args.manifest))
@@ -371,6 +389,234 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         return 2
 
 
+def _cmd_uninstall_harness_all(args: argparse.Namespace) -> int:
+    """Expand the public stable set and aggregate contract-shaped records
+    for uninstall."""
+
+    try:
+        manifest_path = resolve_manifest(args.manifest)
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    records: list[dict[str, object]] = []
+    child_codes: list[int] = []
+    for harness in _STABLE_INSTALL_HARNESSES:
+        child_args = argparse.Namespace(
+            **{
+                **vars(args),
+                "harness": harness,
+                "manifest": str(manifest_path),
+                "json": True,
+            }
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            child_code = _cmd_uninstall_harness(child_args)
+        child_codes.append(child_code)
+        try:
+            child_payload = json.loads(output.getvalue())
+        except json.JSONDecodeError:
+            child_payload = None
+        if not isinstance(child_payload, dict):
+            child_payload = {
+                "tool": "acb",
+                "harness": harness,
+                "user": None,
+                "status": "failed",
+                "actions": [],
+                "no_op": False,
+            }
+        records.append(child_payload)
+
+    expected_code = 2 if args.dry_run else 0
+    uninstalled = all(
+        code == expected_code and record.get("status") == "uninstalled"
+        for code, record in zip(child_codes, records, strict=True)
+    )
+    no_op = uninstalled and all(record.get("no_op") is True for record in records)
+    actions: list[dict[str, object]] = []
+    for record in records:
+        record_actions = record.get("actions")
+        if isinstance(record_actions, list):
+            actions.extend(
+                action for action in record_actions if isinstance(action, dict)
+            )
+    payload = {
+        "tool": "acb",
+        "harness": "all",
+        "user": None,
+        "status": "uninstalled" if uninstalled else "failed",
+        "actions": actions,
+        "no_op": no_op,
+        "results": records,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        for record in records:
+            print(
+                f"{record['harness']}: {record['status']}"
+                + (" (no-op)" if record.get("no_op") is True else "")
+            )
+
+    if not uninstalled:
+        return 1
+    return 2 if args.dry_run else 0
+
+
+def _cmd_uninstall_harness(args: argparse.Namespace) -> int:
+    """Remove acb's owned shims and MCP wiring from one harness.
+
+    The inverse of ``install-harness``: re-renders each expected shim/MCP entry
+    and removes only those whose on-disk content matches (ownership hash check)
+    or carries the acb managed marker (stale but acb-owned). Hand-authored or
+    modified artifacts are preserved and reported as manual actions. ``--dry-run``
+    is opt-in (matching ``install-harness``); emits provenance on every removal.
+    After removal, re-inspects to confirm capabilities are now ABSENT.
+    """
+    if args.harness == "all":
+        return _cmd_uninstall_harness_all(args)
+
+    if args.harness not in KNOWN_HARNESSES:
+        print(
+            f"error: unknown harness {args.harness!r} "
+            f"(known: {sorted(KNOWN_HARNESSES | {'all'})})",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        manifest_path = resolve_manifest(args.manifest)
+        plan = _uninstall_plan_for_harness(manifest_path, args.harness)
+    except ManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.dry_run:
+        adapter = adapters().get(args.harness)
+        verdicts = _inspect_for_harness(manifest_path, args.harness)
+        unavailable = bool(verdicts) and (adapter is None or not adapter.available())
+        conflict = any(bool(action.payload.get("conflict")) for action in plan)
+        status = "failed" if (unavailable or conflict) else "uninstalled"
+        payload = {
+            "tool": "acb",
+            "harness": args.harness,
+            "user": None,
+            "status": status,
+            "actions": [
+                {
+                    "kind": action.kind,
+                    "path": action.target,
+                    "detail": action.summary,
+                    "conflict": bool(action.payload.get("conflict")),
+                }
+                for action in plan
+            ],
+            "conflict": conflict,
+            "no_op": not plan and not unavailable,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 2
+        if not plan:
+            print(f"{args.harness}: nothing to uninstall — no acb-owned artifacts found")
+            return 2
+        for action in plan:
+            verb = "would remove" if action.kind != "manual" else "manual"
+            print(f"[{verb}] {action.capability} / {action.harness}: {action.summary}")
+        auto = [a for a in plan if a.kind != "manual"]
+        if auto:
+            print(f"\n{len(auto)} action(s) planned. Re-run without --dry-run to perform them.")
+        return 2
+
+    harness_adapters = adapters()
+    adapter = harness_adapters.get(args.harness)
+    applied = 0
+    skipped = 0
+    action_results: list[ActionResult] = []
+    for action in plan:
+        if adapter is None or not adapter.available():
+            print(f"[SKIP] {action.capability}: adapter unavailable")
+            skipped += 1
+            continue
+        provider_name = action.capability.split(":", 1)[0]
+        provider = PROVIDERS.get(provider_name)
+        if provider is None:
+            print(f"[SKIP] {action.capability}: no provider {provider_name!r}")
+            skipped += 1
+            continue
+        try:
+            result = provider.apply(action, adapter)
+        except (OSError, KeyError, RuntimeError) as exc:
+            result = ActionResult(action, "failed", f"apply error: {exc}")
+        provenance.emit(result)
+        action_results.append(result)
+        tag = result.status.upper()
+        line = f"[{tag}] {action.capability}: {result.detail or action.summary}"
+        if result.backup_path:
+            line += f"  (backup: {result.backup_path})"
+        if not args.json:
+            print(line)
+        if result.status == "applied":
+            applied += 1
+        else:
+            skipped += 1
+
+    verdicts = _inspect_for_harness(manifest_path, args.harness)
+    if not args.json:
+        print(f"\n— {args.harness} capability status —")
+        _print_table(verdicts)
+
+    failed = any(r.status == "failed" for r in action_results)
+    # An acb-owned artifact that was preserved (user-edited marker shim) is a
+    # conflict: the uninstall did not complete and must not report clean success.
+    conflict = any(
+        r.action.kind == "manual" and bool(r.action.payload.get("conflict"))
+        for r in action_results
+    )
+    if conflict and not args.json:
+        print(
+            f"\n{args.harness}: uninstall incomplete — acb-owned artifact(s) "
+            f"preserved because they were modified; remove manually to complete."
+        )
+    status = "failed" if (failed or conflict) else "uninstalled"
+    if args.json:
+        payload = {
+            "tool": "acb",
+            "harness": args.harness,
+            "user": None,
+            "status": status,
+            "actions": [
+                {
+                    "kind": result.action.kind,
+                    "path": result.action.target,
+                    "detail": (
+                        result.action.summary
+                        if result.action.payload.get("conflict")
+                        else result.detail or result.action.summary
+                    ),
+                    "status": result.status,
+                    "conflict": bool(result.action.payload.get("conflict")),
+                }
+                for result in action_results
+            ],
+            "conflict": conflict,
+            "checks": [
+                {
+                    "capability": verdict.capability,
+                    "harness": verdict.harness,
+                    "status": verdict.status.value,
+                    "detail": verdict.detail,
+                }
+                for verdict in verdicts
+            ],
+            "no_op": not plan,
+        }
+        print(json.dumps(payload, indent=2))
+    return 1 if (failed or conflict) else 0
+
+
 def _cmd_install_harness_all(args: argparse.Namespace) -> int:
     """Expand the public stable set and aggregate contract-shaped records."""
 
@@ -453,7 +699,12 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
     discovery shims and MCP wiring a harness needs from the manifest, then
     runs a focused doctor to report per-capability status.  Re-runnable: a
     fully-provisioned harness yields a no-op plan and all-PRESENT_OK verdicts.
+
+    With ``--uninstall``: removes acb-owned shims and MCP wiring instead.
     """
+    if getattr(args, "uninstall", False):
+        return _cmd_uninstall_harness(args)
+
     if args.harness == "all":
         return _cmd_install_harness_all(args)
 
@@ -474,11 +725,23 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
     plan = _plan_for_harness(manifest_path, args.harness)
 
     if args.dry_run:
+        adapter = adapters().get(args.harness)
+        verdicts = _inspect_for_harness(manifest_path, args.harness)
+        unavailable = bool(verdicts) and (adapter is None or not adapter.available())
+        blocking = unavailable or any(
+            action.kind == "manual"
+            and bool(
+                action.payload.get("conflict")
+                or action.payload.get("unsupported")
+            )
+            for action in plan
+        )
+        verdicts = verdicts if unavailable else []
         payload = {
             "tool": "acb",
             "harness": args.harness,
             "user": None,
-            "status": "installed",
+            "status": "failed" if blocking else "installed",
             "actions": [
                 {
                     "kind": action.kind,
@@ -487,7 +750,16 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
                 }
                 for action in plan
             ],
-            "no_op": not plan,
+            "checks": [
+                {
+                    "capability": verdict.capability,
+                    "harness": verdict.harness,
+                    "status": verdict.status.value,
+                    "detail": verdict.detail,
+                }
+                for verdict in verdicts
+            ],
+            "no_op": not plan and not unavailable,
         }
         if args.json:
             print(json.dumps(payload, indent=2))
@@ -522,7 +794,7 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
             continue
         try:
             result = provider.apply(action, adapter)
-        except (OSError, KeyError) as exc:
+        except (OSError, KeyError, RuntimeError) as exc:
             result = ActionResult(action, "failed", f"apply error: {exc}")
         provenance.emit(result)
         action_results.append(result)
@@ -621,7 +893,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ih = sub.add_parser(
         "install-harness",
-        help="install shims into one harness and verify capabilities (bootstrap)",
+        help="install (or --uninstall) shims into one harness and verify capabilities",
     )
     ih.add_argument(
         "harness", help="harness to provision (claude, opencode, codex, or all)"
@@ -632,7 +904,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ih.add_argument(
         "--dry-run", action="store_true",
-        help="show what would be installed without applying"
+        help="show what would be installed/uninstalled without applying"
+    )
+    ih.add_argument(
+        "--uninstall", action="store_true",
+        help="remove acb-owned shims and MCP wiring (ownership hash check, preserves hand-authored)"
     )
     ih.add_argument("--json", action="store_true", help="emit contract-shaped JSON")
     ih.set_defaults(func=_cmd_install_harness)
