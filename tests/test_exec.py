@@ -53,6 +53,9 @@ def test_inject_mapping_renames_env_var(
 ) -> None:
     monkeypatch.setenv("SRC", SECRET)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    # Windows CI images preset PGPASSWORD; the strict path (inject declared)
+    # rightly refuses to shadow an inherited variable, so clear it here.
+    monkeypatch.delenv("PGPASSWORD", raising=False)
     out = tmp_path / "seen.txt"
     cap = Capability(
         "cred:db", "cred", ("opencode",),
