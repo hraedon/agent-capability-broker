@@ -209,7 +209,7 @@ def test_suite_extra_pins_public_facade_release_and_api_contract(
         (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     )
     extra = project["project"]["optional-dependencies"]["suite-secrets"]
-    assert extra == ["regista>=0.5.1,<0.6"]
+    assert extra == ["regista-hraedon>=0.5.1,<0.6"]
 
     fake = FakeResolver()
     fake.API_VERSION = 2

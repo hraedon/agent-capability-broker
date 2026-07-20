@@ -651,6 +651,107 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _serialize_toml_value(value: str | list[str]) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(f'"{v}"' for v in value) + "]"
+    return f'"{value}"'
+
+
+def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]]) -> str:
+    lines = [f'[capability."{cap_id}"]']
+    lines.append(f'provider   = {_serialize_toml_value("cred")}')
+    for key, value in options.items():
+        lines.append(f'{key:<10} = {_serialize_toml_value(value)}')
+    return "\n".join(lines) + "\n"
+
+
+def _cmd_register(args: argparse.Namespace) -> int:
+    cap_id: str = args.capability_id
+    if not _CAPABILITY_ID.match(cap_id):
+        print(f"error: invalid capability ID {cap_id!r} (must match cred:<name> or e2e:<name>)", file=sys.stderr)
+        return 2
+    if not cap_id.startswith("cred:"):
+        print("error: register currently supports only cred: capabilities", file=sys.stderr)
+        return 2
+
+    for harness in args.harnesses:
+        if harness not in KNOWN_HARNESSES:
+            print(f"error: unknown harness {harness!r} (known: {', '.join(sorted(KNOWN_HARNESSES))})", file=sys.stderr)
+            return 2
+
+    manifest_path = resolve_manifest(getattr(args, "manifest", None))
+
+    existing: list[Capability] = []
+    if manifest_path.is_file():
+        try:
+            existing = parse_manifest(manifest_path)
+        except ManifestError as exc:
+            print(f"error: cannot parse existing manifest: {exc}", file=sys.stderr)
+            return 2
+
+    if any(c.id == cap_id for c in existing):
+        if args.json:
+            print(json.dumps({"capability": cap_id, "status": "already_registered", "path": str(manifest_path)}, indent=2))
+        else:
+            print(f"{cap_id}: already registered in {manifest_path}")
+        return 0
+
+    options: dict[str, str | list[str]] = {"vault": args.vault}
+    if len(args.fields) == 1:
+        options["field"] = args.fields[0]
+    else:
+        options["fields"] = args.fields
+    if args.env_prefix:
+        options["env_prefix"] = args.env_prefix
+    if args.vault_env:
+        options["vault_env"] = args.vault_env
+    options["harnesses"] = args.harnesses
+
+    entry = _serialize_capability_toml(cap_id, options)
+
+    if not args.apply:
+        if args.json:
+            print(json.dumps({"capability": cap_id, "status": "dry_run", "entry": entry, "path": str(manifest_path)}, indent=2))
+        else:
+            print(f"would append to {manifest_path}:\n")
+            print(entry)
+            print("Re-run with --apply to write.")
+        return 2
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("a", encoding="utf-8") as f:
+        f.write("\n" + entry)
+
+    if args.json:
+        print(json.dumps({"capability": cap_id, "status": "registered", "path": str(manifest_path)}, indent=2))
+    else:
+        print(f"registered {cap_id} in {manifest_path}")
+
+    for harness in args.harnesses:
+        adapter = adapters().get(harness)
+        if adapter is None or not adapter.available():
+            continue
+        caps = parse_manifest(manifest_path)
+        cap = next((c for c in caps if c.id == cap_id), None)
+        if cap is None:
+            continue
+        provider = PROVIDERS.get(cap.provider)
+        if provider is None:
+            continue
+        plan = provider.plan_reconcile(cap, harness, adapter)
+        for action in plan:
+            try:
+                result = provider.apply(action, adapter)
+                provenance.emit(result)
+                if not args.json:
+                    print(f"  [{result.status.upper()}] {harness}: {result.detail or action.summary}")
+            except (OSError, KeyError) as exc:
+                if not args.json:
+                    print(f"  [FAILED] {harness}: {exc}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -707,6 +808,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ih.add_argument("--json", action="store_true", help="emit contract-shaped JSON")
     ih.set_defaults(func=_cmd_install_harness)
+
+    reg = sub.add_parser(
+        "register",
+        help="add a credential capability to the manifest and render shims (idempotent)",
+    )
+    reg.add_argument("capability_id", help="capability ID (e.g. cred:pypi)")
+    reg.add_argument("--vault", required=True, help="Vault KV v2 path (e.g. kv/homelab/pypi/token)")
+    reg.add_argument(
+        "--fields", nargs="+", required=True,
+        help="secret fields to expose (e.g. token, or username password)",
+    )
+    reg.add_argument("--env-prefix", help="env var prefix for injection (e.g. PYPI → PYPI_TOKEN)")
+    reg.add_argument(
+        "--vault-env", help="per-plane AppRole .env file (for non-default access planes)"
+    )
+    reg.add_argument(
+        "--harnesses", nargs="+", default=list(_STABLE_INSTALL_HARNESSES),
+        help="harnesses to expose (default: claude opencode)",
+    )
+    reg.add_argument(
+        "--apply", action="store_true",
+        help="write the manifest entry and render shims (default: dry-run)",
+    )
+    reg.add_argument("--json", action="store_true", help="emit the result as JSON")
+    reg.set_defaults(func=_cmd_register)
 
     return parser
 

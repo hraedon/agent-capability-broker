@@ -1,5 +1,5 @@
 [project]
-name = "agent-capability-broker"
+name = "agent-capability-broker-hraedon"
 version = "0.1.0"
 description = "Keep agents at capability parity across harnesses (creds, E2E tooling) from one manifest"
 readme = "README.md"
@@ -41,7 +41,7 @@ cred = [
 # Provider-neutral suite resolver. Imported lazily by source="suite" only;
 # doctor and the existing Vault/environment paths work without it.
 suite-secrets = [
-    "regista>=0.5.1,<0.6",
+    "regista-hraedon>=0.5.1,<0.6",
 ]
 # Hermes config is YAML, parsed by pyyaml. The core never imports this; on hosts
 # without Hermes the read path degrades to empty (a warning, not a crash) and the
