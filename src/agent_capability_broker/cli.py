@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import sys
 from contextlib import redirect_stdout
@@ -33,6 +34,47 @@ from .providers import PROVIDERS, adapters, exec_composed
 
 _STABLE_INSTALL_HARNESSES = ("claude", "opencode")
 _CAPABILITY_ID = re.compile(r"^(?:cred|e2e):\S+$")
+
+
+def emit_error(
+    code: str,
+    message: str,
+    *,
+    use_json: bool,
+    detail: str | None = None,
+    retryable: bool = False,
+    exit_code: int = 1,
+) -> int:
+    """Report an operational error per suite CLI contract v1 §3 and return the code.
+
+    Under ``--json`` the common error envelope is the single stdout document;
+    otherwise the human ``error:`` message goes to *stderr* (acb's existing
+    convention). No path prints an error and exits 0. ``exit_code`` defaults to
+    1 — the operational-error slot in the taxonomy (0 success, 2 usage). The
+    envelope shape is validated by ``agent_suite.conformance`` in the tests; it
+    is reproduced here so runtime code never depends on the dev-only kit.
+    """
+    if use_json:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": code,
+                        "message": message,
+                        "detail": detail,
+                        "retryable": retryable,
+                        "partial": None,
+                    },
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"error: {message}", file=sys.stderr)
+        if detail:
+            print(f"  {detail}", file=sys.stderr)
+    return exit_code
 
 
 def _inspect_all(manifest_path: Path) -> list[Verdict]:
@@ -128,8 +170,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     try:
         verdicts = _inspect_all(resolve_manifest(args.manifest))
     except ManifestError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+        # A missing or malformed manifest is an *operational* failure, not a
+        # usage error: emit the contract-v1 envelope (§3) and exit 1, not 2.
+        # (The act-path verbs still return 2 here pending live-validated
+        # reclassification — acb WI-014 defers that; this read-only path is safe.)
+        return emit_error("MANIFEST_ERROR", str(exc), use_json=args.json)
 
     checks = _doctor_checks(verdicts)
     ok, degraded = _classify_health(checks)
@@ -668,7 +713,11 @@ def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]])
 def _cmd_register(args: argparse.Namespace) -> int:
     cap_id: str = args.capability_id
     if not _CAPABILITY_ID.match(cap_id):
-        print(f"error: invalid capability ID {cap_id!r} (must match cred:<name> or e2e:<name>)", file=sys.stderr)
+        print(
+            f"error: invalid capability ID {cap_id!r} "
+            "(must match cred:<name> or e2e:<name>)",
+            file=sys.stderr,
+        )
         return 2
     if not cap_id.startswith("cred:"):
         print("error: register currently supports only cred: capabilities", file=sys.stderr)
@@ -676,7 +725,11 @@ def _cmd_register(args: argparse.Namespace) -> int:
 
     for harness in args.harnesses:
         if harness not in KNOWN_HARNESSES:
-            print(f"error: unknown harness {harness!r} (known: {', '.join(sorted(KNOWN_HARNESSES))})", file=sys.stderr)
+            print(
+                f"error: unknown harness {harness!r} "
+                f"(known: {', '.join(sorted(KNOWN_HARNESSES))})",
+                file=sys.stderr,
+            )
             return 2
 
     manifest_path = resolve_manifest(getattr(args, "manifest", None))
@@ -691,7 +744,11 @@ def _cmd_register(args: argparse.Namespace) -> int:
 
     if any(c.id == cap_id for c in existing):
         if args.json:
-            print(json.dumps({"capability": cap_id, "status": "already_registered", "path": str(manifest_path)}, indent=2))
+            print(json.dumps(
+                {"capability": cap_id, "status": "already_registered",
+                 "path": str(manifest_path)},
+                indent=2,
+            ))
         else:
             print(f"{cap_id}: already registered in {manifest_path}")
         return 0
@@ -711,7 +768,11 @@ def _cmd_register(args: argparse.Namespace) -> int:
 
     if not args.apply:
         if args.json:
-            print(json.dumps({"capability": cap_id, "status": "dry_run", "entry": entry, "path": str(manifest_path)}, indent=2))
+            print(json.dumps(
+                {"capability": cap_id, "status": "dry_run", "entry": entry,
+                 "path": str(manifest_path)},
+                indent=2,
+            ))
         else:
             print(f"would append to {manifest_path}:\n")
             print(entry)
@@ -723,7 +784,10 @@ def _cmd_register(args: argparse.Namespace) -> int:
         f.write("\n" + entry)
 
     if args.json:
-        print(json.dumps({"capability": cap_id, "status": "registered", "path": str(manifest_path)}, indent=2))
+        print(json.dumps(
+            {"capability": cap_id, "status": "registered", "path": str(manifest_path)},
+            indent=2,
+        ))
     else:
         print(f"registered {cap_id} in {manifest_path}")
 
@@ -744,7 +808,10 @@ def _cmd_register(args: argparse.Namespace) -> int:
                 result = provider.apply(action, adapter)
                 provenance.emit(result)
                 if not args.json:
-                    print(f"  [{result.status.upper()}] {harness}: {result.detail or action.summary}")
+                    print(
+                        f"  [{result.status.upper()}] {harness}: "
+                        f"{result.detail or action.summary}"
+                    )
             except (OSError, KeyError) as exc:
                 if not args.json:
                     print(f"  [FAILED] {harness}: {exc}")
@@ -837,8 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    raw = list(sys.argv[1:] if argv is None else argv)
+def _dispatch(raw: list[str], argv: list[str] | None) -> int:
     if raw and raw[0] == "exec":
         return _cmd_exec_raw(raw[1:])
     parser = build_parser()
@@ -852,6 +918,41 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     return int(args.func(args))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Top-level entry point and last-resort error boundary (CLI contract §3/§4).
+
+    argparse's usage errors raise ``SystemExit`` (exit 2) straight through — a
+    ``BaseException``, not caught here, so the usage taxonomy is preserved. Any
+    other uncaught exception becomes a contract envelope instead of a traceback:
+    a ``ManifestError`` that escaped an act-path verb keeps its ``MANIFEST_ERROR``
+    code; anything else is reported as ``INTERNAL_ERROR``. A closed downstream
+    pipe is swallowed the CPython way so the interpreter's final flush can't
+    re-raise.
+    """
+    raw = list(sys.argv[1:] if argv is None else argv)
+    json_mode = "--json" in raw
+    try:
+        return _dispatch(raw, argv)
+    except BrokenPipeError:
+        # A downstream reader closed the pipe (e.g. `acb ... | head`). Redirect
+        # stdout to devnull so the final flush at interpreter exit can't raise,
+        # and exit without a traceback (§4).
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return 1
+    except ManifestError as exc:
+        return emit_error("MANIFEST_ERROR", str(exc), use_json=json_mode)
+    except Exception as exc:  # last-resort boundary: never surface a traceback
+        return emit_error(
+            "INTERNAL_ERROR",
+            f"unexpected {exc.__class__.__name__}: {exc}",
+            use_json=json_mode,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

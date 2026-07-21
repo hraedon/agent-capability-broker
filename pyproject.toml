@@ -32,6 +32,11 @@ dev = [
     # pyyaml so the HermesAdapter tests (importorskip("yaml")) run in CI under
     # the plain [dev] install, not silently skipped.
     "pyyaml>=6.0,<7",
+    # The CLI contract v1 conformance kit (Plan 018 WI-2 / Plan 019 B1). Now a
+    # published PyPI wheel, so it is a normal pinned dev dep — no git+SHA CI
+    # step. Consumed only by tests/test_cli_conformance.py; never imported by
+    # runtime code (the arch test guards that).
+    "agent-suite-conformance==1.0.0",
 ]
 # The cred provider's Vault/HTTP client. The core never imports this; when
 # absent, `cred` inspect degrades to UNKNOWN with a reason instead of crashing.
