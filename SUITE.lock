@@ -1,0 +1,36 @@
+# SUITE.lock — agent-capability-broker (acb) face compatibility manifest.
+#
+# Records the released suite-spine (regista) version acb composes with, so acb
+# participates in the umbrella cross-repo lock-agreement check (Plan 019
+# B2-generalize): every member's [spine].version/sha must equal the umbrella
+# agent-suite/SUITE.lock [components.regista].version/revision.
+#
+# NOTE — acb is a MARKER-ONLY member. Unlike the faces (agent-notes, dossier)
+# and cairn, acb does NOT install or develop against regista in CI: regista is
+# an optional, lazily-imported extra (`suite-secrets`), used only by
+# source="suite", and acb's tests stub it via a FakeResolver. So there is no
+# `scripts/dev-install.py` / develop-against-lock machinery here — nothing to
+# resolve. This [spine] block exists solely so the cross-repo agreement check
+# can include acb and catch a drift in acb's declared spine floor. Keep
+# [spine].version in agreement with the umbrella; bump the `suite-secrets`
+# floor in pyproject.toml when the compatible range changes.
+
+[component]
+name = "agent-capability-broker"
+version = "0.1.0"
+
+[spine]
+name = "regista"
+# PyPI distribution (renamed from `regista`; import name is still `regista`).
+distribution = "regista-hraedon"
+repo = "hraedon/regista"
+# The released PyPI version the suite ships and acb's suite-secrets extra
+# composes with. Must equal agent-suite/SUITE.lock [components.regista].version.
+version = "0.5.3"
+# The git SHA of regista == the umbrella's [components.regista].revision ==
+# the v0.5.3 tag commit.
+sha = "9718b941939884fee94c260f19efe3e4040c456b"
+describe = "v0.5.3"
+# The published lower bound acb actually declares (pyproject.toml suite-secrets
+# extra). The exact version the suite develops against is `version` above.
+pyproject_floor = "regista-hraedon>=0.5.1,<0.6"

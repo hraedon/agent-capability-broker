@@ -71,6 +71,15 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/mypy src
 ```
 
+**`SUITE.lock` is a marker only (Plan 019 B2-generalize).** acb records the
+released spine (regista) version in `SUITE.lock` `[spine]` so the umbrella
+cross-repo lock-agreement check can include it — but acb does **not** install or
+develop against regista in CI (regista is the optional, lazily-imported
+`suite-secrets` extra, stubbed by a `FakeResolver` in tests). So there is no
+`scripts/dev-install.py` here, unlike the faces and cairn. Keep `[spine].version`
+in agreement with the umbrella; bump the `suite-secrets` floor in `pyproject.toml`
+when the compatible range changes.
+
 ## Providers (the extension point)
 
 A provider implements: `inspect` (read-only status for a capability×harness),
