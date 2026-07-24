@@ -155,7 +155,12 @@ def test_doctor_json_healthy_classifies_ok(
 ) -> None:
     root = _harness_env(tmp_path, monkeypatch, opencode_present=True)
     (root / "command").mkdir()
-    (root / "command" / "cred-svc-bot.md").write_text("# shim\n", encoding="utf-8")
+    # A realistic shim body: the surface audit (WI-C) verifies that a declared
+    # capability's installed shim still brokers `acb exec <id>`, so a stub that
+    # brokers nothing is (correctly) reported as clobbered.
+    (root / "command" / "cred-svc-bot.md").write_text(
+        "# shim\n\n```\nacb exec cred:svc-bot -- <command>\n```\n", encoding="utf-8"
+    )
     monkeypatch.setenv("ACB_T", "set")
     manifest = _env_manifest(tmp_path)
 

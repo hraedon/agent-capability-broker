@@ -19,7 +19,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "agent_capability_broker"
 # optional-import modules are added to ALLOWED_EXTRA, not here.
 CORE_MODULES = [
     "model.py", "cli.py", "adapters.py", "providers.py", "provenance.py",
-    "secret_sources.py",
+    "secret_sources.py", "surface.py",
 ]
 STDLIB_OK = {
     "__future__", "argparse", "ast", "collections", "dataclasses", "enum", "functools",
@@ -29,7 +29,9 @@ STDLIB_OK = {
     "platformdirs",
 }
 # Relative imports of these core modules are allowed (e.g. `from .model import ...`).
-CORE_INTERNAL = {"model", "cli", "adapters", "providers", "provenance", "secret_sources"}
+CORE_INTERNAL = {
+    "model", "cli", "adapters", "providers", "provenance", "secret_sources", "surface",
+}
 # Optional-extra modules that must NEVER be imported at module level by the core.
 FORBIDDEN_IN_CORE = {"cred_vault", "hvac"}
 

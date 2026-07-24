@@ -41,6 +41,42 @@ from .secret_sources import (
 )
 
 _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webkit")
+# Playwright's browser-cache layout: one `<dir-prefix>-<build>` directory per
+# installed browser, with the executable at a platform-specific relative path
+# inside it. Used by `E2eProvider.exec` to hand a child the *concrete* browser
+# it may drive, so the child needs no Playwright wiring discovery of its own.
+_BROWSER_DIR_ALIASES: dict[str, tuple[str, ...]] = {
+    "chromium": ("chromium", "chromium_headless_shell"),
+    "chrome": ("chromium",),
+    "firefox": ("firefox",),
+    "webkit": ("webkit",),
+}
+_BROWSER_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    "chromium": (
+        "chrome-linux64/chrome",
+        "chrome-linux/chrome",
+        "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        "chrome-win/chrome.exe",
+    ),
+    "chromium_headless_shell": (
+        "chrome-headless-shell-linux64/chrome-headless-shell",
+        "chrome-linux/headless_shell",
+        "chrome-headless-shell-mac/chrome-headless-shell",
+        "chrome-headless-shell-win64/chrome-headless-shell.exe",
+        "chrome-win/headless_shell.exe",
+    ),
+    "firefox": (
+        "firefox/firefox",
+        "firefox/Nightly.app/Contents/MacOS/firefox",
+        "firefox/firefox.exe",
+    ),
+    "webkit": (
+        "pw_run.sh",
+        "Playwright.app/Contents/MacOS/Playwright",
+        "Playwright.exe",
+    ),
+}
+_E2E_REMOTE_SCHEMES = ("ws://", "wss://", "http://", "https://")
 # The acb.checkout-receipt.v1 contract shape (PR #14 F2): env names and
 # capability ids acb accepts on a validated path must be names the receipt's
 # reference consumer (windows-evidence-lab capabilities.py) also accepts —
@@ -156,6 +192,102 @@ def _pin_argv(command: tuple[str, ...], pin: str) -> list[str]:
         else:
             out.append(tok)
     return out
+
+
+class E2eUnavailable(RuntimeError):
+    """The e2e capability is not usable on this host as the manifest declares it.
+
+    Raised by `E2eProvider.exec` *before* any child is launched: no browser
+    binary for the requested browser, an unsupported engine/backend, or a
+    remote backend with no usable endpoint. The CLI maps it to the contract-v1
+    error envelope (`E2E_UNAVAILABLE`) rather than a traceback.
+    """
+
+
+def _build_number(path: Path, prefix: str) -> int:
+    """Sort key for a `<prefix>-<build>` browser dir; unparseable builds sort last."""
+    suffix = path.name[len(prefix) + 1 :]
+    return int(suffix) if suffix.isdigit() else -1
+
+
+def _resolve_local_browser(browser: str) -> tuple[Path, Path]:
+    """Locate the provisioned browser executable -> (executable, cache root).
+
+    Reads only what the manifest provisions: the browser name plus Playwright's
+    standard cache location (honoring `PLAYWRIGHT_BROWSERS_PATH`). The newest
+    installed build of the requested browser wins; a request for `chromium`
+    falls back to the headless shell when only that is installed. Raises
+    `E2eUnavailable` with the exact remediation command when nothing matches —
+    the honest negative path, never a crash.
+    """
+    aliases = _BROWSER_DIR_ALIASES.get(browser.lower())
+    if aliases is None:
+        raise E2eUnavailable(
+            f"unsupported browser {browser!r} "
+            f"(known: {sorted(_BROWSER_DIR_ALIASES)})"
+        )
+    cache = _browser_cache()
+    if not cache.is_dir():
+        raise E2eUnavailable(
+            f"no Playwright browser cache at {cache}; run "
+            f"`playwright install {browser}` (or set PLAYWRIGHT_BROWSERS_PATH)"
+        )
+    for alias in aliases:
+        candidates = sorted(
+            (p for p in cache.iterdir() if p.is_dir() and p.name.startswith(f"{alias}-")),
+            key=lambda p: _build_number(p, alias),
+            reverse=True,
+        )
+        for build_dir in candidates:
+            for rel in _BROWSER_EXECUTABLES.get(alias, ()):
+                exe = build_dir / rel
+                if exe.is_file():
+                    return exe, cache
+    raise E2eUnavailable(
+        f"no {browser} binary under {cache}; run `playwright install {browser}`"
+    )
+
+
+def _e2e_child_env(cap: Capability) -> dict[str, str]:
+    """Environment the qualified child receives for an e2e checkout.
+
+    The e2e capability brokers a *browser*, not a secret: the child is handed
+    the concrete endpoint or executable the manifest provisions and drives it
+    itself. Nothing here is secret, so (unlike the cred path) there is no
+    receipt, no collision refusal, and no value zeroing — but the same
+    "resolve-and-validate before launching anything" order is kept.
+    """
+    engine = str(cap.options.get("engine", "playwright"))
+    if engine != "playwright":
+        raise E2eUnavailable(f"{cap.id}: unsupported engine {engine!r} (known: 'playwright')")
+
+    env = os.environ.copy()
+    env["ACB_E2E_CAPABILITY"] = cap.id
+    env["ACB_E2E_ENGINE"] = engine
+
+    backend = str(cap.options.get("backend", "local"))
+    if backend == "remote":
+        endpoint = cap.options.get("endpoint") or cap.options.get("url")
+        if not isinstance(endpoint, str) or not endpoint.startswith(_E2E_REMOTE_SCHEMES):
+            raise E2eUnavailable(
+                f"{cap.id}: backend 'remote' requires options.endpoint as a "
+                f"{'/'.join(s.rstrip(':/') for s in _E2E_REMOTE_SCHEMES)} URL"
+            )
+        env["ACB_E2E_BACKEND"] = "remote"
+        env["ACB_E2E_ENDPOINT"] = endpoint
+        return env
+    if backend != "local":
+        raise E2eUnavailable(
+            f"{cap.id}: unknown backend {backend!r} (expected 'local' or 'remote')"
+        )
+
+    browser = str(cap.options.get("browser", "chromium"))
+    executable, cache = _resolve_local_browser(browser)
+    env["ACB_E2E_BACKEND"] = "local"
+    env["ACB_E2E_BROWSER"] = browser
+    env["ACB_E2E_EXECUTABLE"] = str(executable)
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(cache)
+    return env
 
 
 class E2eProvider:
@@ -295,10 +427,66 @@ class E2eProvider:
         return ActionResult(action, "skipped", f"unsupported action kind {action.kind!r}")
 
     def exec(self, cap: Capability, argv: list[str]) -> int:
-        raise NotImplementedError(
-            "e2e exec (running a command against a provisioned browser) is not yet "
-            "implemented; use `reconcile` to fix wiring"
+        """Run `argv` with the provisioned browser brokered into its environment.
+
+        Same inject-and-run shape as the cred path (`_exec_checkout`): the
+        capability is resolved and validated *before* the child is launched,
+        provenance is emitted for the attempt and the outcome, and the child's
+        exit code is returned. What is injected is a browser handle
+        (`ACB_E2E_EXECUTABLE` / `ACB_E2E_ENDPOINT` plus
+        `PLAYWRIGHT_BROWSERS_PATH`), not a secret — so acb neither mints a
+        checkout receipt nor zeroes values here. acb never drives the browser
+        itself: the qualified child does, exactly as the cred child uses the
+        credential it is handed.
+        """
+        if not argv:
+            raise ValueError("exec requires a command after '--'")
+
+        # Resolve first: an unprovisioned capability must fail honestly with no
+        # child launched and no provenance claiming an execution happened.
+        child_env = _e2e_child_env(cap)
+
+        handle = child_env.get("ACB_E2E_ENDPOINT") or child_env.get("ACB_E2E_EXECUTABLE", "")
+        started_action = Action(
+            cap.id, "local", "exec", cap.id,
+            f"browser checkout starting for child '{argv[0]}' "
+            f"(backend {child_env['ACB_E2E_BACKEND']})",
         )
+        provenance.emit(
+            ActionResult(started_action, "started", "browser resolution starting")
+        )
+        terminal_action = Action(
+            cap.id, "local", "exec", cap.id,
+            f"brokered browser {handle} to child '{argv[0]}'",
+        )
+        terminal = ActionResult(terminal_action, "failed", "browser checkout interrupted")
+        result: subprocess.CompletedProcess[bytes] | None = None
+        pending_error: RuntimeError | None = None
+        try:
+            try:
+                result = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
+            except OSError as exc:
+                error_kind = type(exc).__name__
+                terminal = ActionResult(
+                    terminal_action, "failed", f"child launch failed ({error_kind})"
+                )
+                pending_error = RuntimeError(
+                    f"{cap.id}: child launch failed ({error_kind})"
+                )
+            else:
+                terminal = ActionResult(
+                    terminal_action,
+                    "applied" if result.returncode == 0 else "failed",
+                    f"child exited {result.returncode}",
+                )
+        finally:
+            provenance.emit(terminal)
+
+        if pending_error is not None:
+            raise pending_error
+        if result is None:  # explicit guard; an `assert` would be stripped under `python -O`
+            raise RuntimeError(f"{cap.id}: browser checkout completed without a child result")
+        return result.returncode
 
 
 def _inject_var(field: str, mapping: object, prefix: object = None) -> str:
@@ -766,16 +954,22 @@ def _run_contained(
     return subprocess.CompletedProcess(argv, returncode)
 
 
-def _cred_shim_name(cap: Capability) -> str:
+def shim_name(cap: Capability) -> str:
     """The command/skill shim that surfaces `acb exec <cap>` to a harness.
 
     Derived from the capability id (`cred:svc-bot` -> `cred-svc-bot`), overridable
-    via `options.shim`. This is the discoverability artifact `doctor` looks for.
+    via `options.shim`. This is the discoverability artifact `doctor` looks for,
+    and the name the surface audit (`surface.py`) diffs the installed shim
+    inventory against.
     """
     shim = cap.options.get("shim")
     if isinstance(shim, str) and shim:
         return shim
     return cap.id.replace(":", "-")
+
+
+# Historical private name, kept so existing call sites/tests stay valid.
+_cred_shim_name = shim_name
 
 
 def _vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:

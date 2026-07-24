@@ -34,6 +34,17 @@ never had a recorded live proof. Small plan, two closures.
   asserted in acb's tests so it can't drift again.
 
 ### WI-1.2 — Live e2e proof, both harnesses
+**Status: proof landed 2026-07-24 (`scripts/e2e_live_proof.py`,
+`docs/e2e-live-proof.md`); PASSED on the operator box.** `E2eProvider.exec` is
+implemented (it brokers the provisioned browser into a qualified child, the same
+inject-and-run shape as the cred path), the proof drives a real Chromium
+navigation + content assertion through it, and the negative path is *verified*:
+removing the Playwright wiring flips `doctor` to the named failing check
+`e2e:chromium@opencode`, and an unprovisioned host makes `acb exec` emit the
+contract-v1 `E2E_UNAVAILABLE` envelope. **Still open:** the per-harness
+invocation half (driving the task from inside Claude Code and from inside
+opencode) — see the scope note in `docs/e2e-live-proof.md`.
+
 - Drive one real browser task (navigate + assert content on a local test page)
   through the e2e capability from Claude Code and from opencode, using only
   what `capabilities.toml` provisions. Record the proof as a committed script +

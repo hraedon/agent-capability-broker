@@ -15,7 +15,11 @@ things:
 
 - **Reports** (`acb doctor`) — diff every harness against the manifest and say,
   per capability, whether it is present-and-working, present-but-broken, absent,
-  or not-applicable. This is discoverability and the parity report. *Read-only.*
+  or not-applicable. It also diffs the other way: the *installed* capability
+  surface against the manifest, naming **rogue** capabilities (wired outside the
+  manifest — a `warn`) and **clobbered** ones (declared, but the installed shim
+  no longer brokers them — a `fail`). This is discoverability and the parity
+  report. *Read-only.*
 - **Reconciles & brokers** (`acb reconcile`, `acb exec`) — render the correct
   per-harness wiring from the manifest so two configs can't drift by hand, and
   inject the capability (credentials, a browser endpoint) into a child process at

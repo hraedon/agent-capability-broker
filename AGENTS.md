@@ -94,6 +94,24 @@ A provider implements: `inspect` (read-only status for a capability×harness),
   self-lookup) gives `PRESENT_OK`/`PRESENT_BROKEN`.
 - **`e2e`** — provisions/locates a Playwright browser (local install or a remote
   endpoint) and exposes it to a harness without a fragile per-session `npx` MCP.
+  `exec` brokers the resolved browser into the child (`ACB_E2E_EXECUTABLE` /
+  `ACB_E2E_ENDPOINT` + `PLAYWRIGHT_BROWSERS_PATH`) — acb never drives the
+  browser itself, exactly as the cred child uses the credential it is handed. An
+  unprovisioned capability raises `E2eUnavailable` **before** any child is
+  launched and the CLI reports the contract-v1 `E2E_UNAVAILABLE` envelope (exit
+  2 — the exec taxonomy is unchanged). Live proof: `docs/e2e-live-proof.md`.
+
+## Rogue / clobbered capability detection
+
+`surface.py` is the *other* direction of `doctor`'s diff: it walks the surface
+each harness actually advertises and compares it to the manifest, so a
+capability added or overwritten outside the manifest is named instead of
+invisible. **rogue** (installed here, undeclared here) is a `warn` — drift the
+operator must see, not proof of breakage; **clobbered** (declared, but its shim
+no longer surfaces `acb exec <id>`) is a `fail` — an integrity violation.
+Findings are checks like any other, so the umbrella classification is unchanged.
+The audit never surfaces shim *contents* — a clobbered shim may hold pasted
+secret material; findings carry the path and the verdict only.
 
 ## Harness adapters
 

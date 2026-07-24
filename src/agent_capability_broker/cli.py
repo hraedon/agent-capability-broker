@@ -30,7 +30,8 @@ from .model import (
     parse_manifest,
     resolve_manifest,
 )
-from .providers import PROVIDERS, adapters, exec_composed
+from .providers import PROVIDERS, E2eUnavailable, adapters, exec_composed
+from .surface import ShimSurface, SurfaceFinding, audit_surface
 
 _STABLE_INSTALL_HARNESSES = ("claude", "opencode")
 _CAPABILITY_ID = re.compile(r"^(?:cred|e2e):\S+$")
@@ -151,6 +152,41 @@ def _doctor_checks(verdicts: list[Verdict]) -> list[dict[str, object]]:
     ]
 
 
+def _surface_findings(manifest_path: Path) -> list[SurfaceFinding]:
+    """Audit the installed capability surface for rogue/clobbered artifacts.
+
+    The manifest-driven verdicts (`_inspect_all`) can only see what the manifest
+    declares; this is the other direction — what is actually installed —
+    so `doctor` names capabilities added or overwritten outside the manifest
+    (agent-suite WI-001). Read-only, and shim bodies are never surfaced.
+    """
+    surfaces: dict[str, ShimSurface] = {
+        name: adapter for name, adapter in adapters().items()
+    }
+    return audit_surface(parse_manifest(manifest_path), surfaces)
+
+
+def _surface_checks(findings: list[SurfaceFinding]) -> list[dict[str, object]]:
+    """Render surface findings as suite-contract check dicts.
+
+    Same shape as `_doctor_checks` (name / status / detail plus the acb
+    capability+harness context) with a `kind` discriminator, so the umbrella
+    reads them exactly like any other check: rogue degrades (`warn`), clobbered
+    fails (`fail`).
+    """
+    return [
+        {
+            "name": f.name,
+            "capability": f.capability,
+            "harness": f.harness,
+            "status": f.status,
+            "detail": f.detail,
+            "kind": f.kind,
+        }
+        for f in findings
+    ]
+
+
 def _classify_health(checks: list[dict[str, object]]) -> tuple[bool, bool]:
     """Classify component health from checks the way the siblings do.
 
@@ -168,7 +204,9 @@ def _classify_health(checks: list[dict[str, object]]) -> tuple[bool, bool]:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     try:
-        verdicts = _inspect_all(resolve_manifest(args.manifest))
+        manifest_path = resolve_manifest(args.manifest)
+        verdicts = _inspect_all(manifest_path)
+        findings = _surface_findings(manifest_path)
     except ManifestError as exc:
         # A missing or malformed manifest is an *operational* failure, not a
         # usage error: emit the contract-v1 envelope (§3) and exit 1, not 2.
@@ -176,7 +214,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         # reclassification — acb WI-014 defers that; this read-only path is safe.)
         return emit_error("MANIFEST_ERROR", str(exc), use_json=args.json)
 
-    checks = _doctor_checks(verdicts)
+    checks = _doctor_checks(verdicts) + _surface_checks(findings)
     ok, degraded = _classify_health(checks)
 
     if args.json:
@@ -198,6 +236,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
     else:
         _print_table(verdicts)
+        for finding in findings:
+            print(f"{finding.status.upper():<5} {finding.name}  ({finding.detail})")
 
     # Exit-code consistent with the JSON verdict (sibling convention: exit 0
     # for ok and degraded, non-zero on a hard fail). Same parity gate as before
@@ -369,7 +409,7 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     return 1 if unapplied else 0
 
 
-_EXEC_USAGE = "usage: acb exec [-m MANIFEST] <cap> [<cap>…] -- <cmd…>"
+_EXEC_USAGE = "usage: acb exec [-m MANIFEST] [--json] <cap> [<cap>…] -- <cmd…>"
 
 
 def _cmd_exec_raw(raw: list[str]) -> int:
@@ -396,10 +436,18 @@ def _cmd_exec_raw(raw: list[str]) -> int:
 
     manifest: str | None = None
     cap_ids: list[str] = []
+    json_out = False
     i = 0
     error: str | None = None
     while i < len(head):
         tok = head[i]
+        if tok == "--json":
+            # Head-only (before `--`): selects the contract-v1 error envelope for
+            # a failed checkout. The child's own stream is untouched — a `--json`
+            # *after* `--` belongs to the child and is never inspected.
+            json_out = True
+            i += 1
+            continue
         if tok in ("-m", "--manifest"):
             if i + 1 >= len(head):
                 error = f"{tok} requires a value"
@@ -471,12 +519,15 @@ def _cmd_exec_raw(raw: list[str]) -> int:
             return 2
         wanted.append(cap)
 
+    # Checkout failures are reported through the contract-v1 envelope helper.
+    # Human mode is byte-identical to the historical `error: …` on stderr and the
+    # exit code stays 2 — the exec taxonomy is load-bearing for the live `cred-*`
+    # skills, so acb WI-014's deferral of act-path reclassification still holds.
     if len(wanted) > 1:
         try:
             return exec_composed(wanted, command)
         except (RuntimeError, NotImplementedError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+            return emit_error("EXEC_ERROR", str(exc), use_json=json_out, exit_code=2)
 
     provider = PROVIDERS.get(wanted[0].provider)
     if provider is None:
@@ -485,9 +536,12 @@ def _cmd_exec_raw(raw: list[str]) -> int:
 
     try:
         return provider.exec(wanted[0], command)
+    except E2eUnavailable as exc:
+        # The browser the manifest declares is not provisioned on this host:
+        # an operational failure with a named code, not a crash (WI-A).
+        return emit_error("E2E_UNAVAILABLE", str(exc), use_json=json_out, exit_code=2)
     except (RuntimeError, NotImplementedError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return emit_error("EXEC_ERROR", str(exc), use_json=json_out, exit_code=2)
 
 
 def _cmd_install_harness_all(args: argparse.Namespace) -> int:
