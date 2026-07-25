@@ -27,7 +27,7 @@ dependencies = ["platformdirs>=4.3,<5"]
 # Pins include upper bounds to keep CI reproducible against future majors.
 dev = [
     "pytest>=8.3,<9",
-    "ruff>=0.7,<1",
+    "ruff>=0.7,<0.16",
     "mypy>=1.13,<2",
     # pyyaml so the HermesAdapter tests (importorskip("yaml")) run in CI under
     # the plain [dev] install, not silently skipped.
