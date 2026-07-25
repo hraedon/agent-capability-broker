@@ -31,7 +31,7 @@ version = "0.5.3"
 # the tip of regista main at lock-generation time (NOT the v0.5.3 tag —
 # regista 0.5.3 has post-tag commits; the umbrella pins the revision it locked).
 sha = "44eb8ffdfe49df5ee271a3fc8f09ce5dccd57443"
-describe = "v0.5.3-2-g44eb8ff"
+describe = "v0.5.3"
 # The published lower bound acb actually declares (pyproject.toml suite-secrets
 # extra). The exact version the suite develops against is `version` above.
 pyproject_floor = "regista-hraedon>=0.5.1,<0.6"
