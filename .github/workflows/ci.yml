@@ -55,3 +55,16 @@ jobs:
 
       - name: Run tests
         run: pytest --tb=short -q
+
+  # The lock is only a lock if something checks it. regista and agent-wake both
+  # shipped a uv.lock that had silently stopped matching pyproject.toml — CI
+  # installs unlocked, so nothing noticed until `uv run` failed on a clean
+  # checkout. This job is the whole fix: it resolves, it does not install.
+  lockfile:
+    name: Lockfile is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+      - name: Verify uv.lock agrees with pyproject.toml
+        run: uv lock --check
