@@ -9,6 +9,7 @@ Windows host.  Live Windows proof is a separately gated credential job.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -118,6 +119,7 @@ class TestWindowsTrustedArgv:
 
         validate_suite_command(cap, [shell, "/c", "echo hello"])
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX paths are not absolute on Windows")
     def test_accepts_posix_absolute_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = FakeResolver()
         _install_fake(monkeypatch, fake)
@@ -125,6 +127,31 @@ class TestWindowsTrustedArgv:
         from agent_capability_broker.secret_sources import validate_suite_command
 
         validate_suite_command(cap, ["/opt/example/bin/lab-control", "--validate"])
+
+    def test_rejects_platform_relative_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeResolver()
+        _install_fake(monkeypatch, fake)
+        relative = "opt/example/bin/lab-control"
+        cap = _windows_cap(trusted_argv=[relative, "--validate"])
+        from agent_capability_broker.secret_sources import validate_suite_command
+
+        with pytest.raises(SecretSourceConfigError, match="absolute"):
+            validate_suite_command(cap, [relative, "--validate"])
+        assert fake.resolve_calls == []
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows-only: drive-less path")
+    def test_rejects_drive_less_windows_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeResolver()
+        _install_fake(monkeypatch, fake)
+        cap = _windows_cap(trusted_argv=[r"\opt\example\lab-control.exe", "--validate"])
+        from agent_capability_broker.secret_sources import validate_suite_command
+
+        with pytest.raises(SecretSourceConfigError, match="absolute"):
+            validate_suite_command(cap, [r"\opt\example\lab-control.exe", "--validate"])
 
     def test_accepts_windows_forward_slash_path(
         self, monkeypatch: pytest.MonkeyPatch
