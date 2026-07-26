@@ -247,6 +247,7 @@ def test_suite_resolution_failure_redacts_ref_backend_error_and_canary(
     assert "password" in rendered and "vault" in rendered
     assert sensitive_ref not in rendered and PASS_CANARY not in rendered
     assert exc_info.value.__context__ is None
+    assert exc_info.value.__cause__ is None
     provenance_text = (tmp_path / "state" / "provenance.jsonl").read_text()
     assert sensitive_ref not in provenance_text and PASS_CANARY not in provenance_text
     events = [
@@ -484,8 +485,9 @@ def test_windows_tree_termination_uses_taskkill_tree_force(
 def test_windows_suite_is_gated_when_taskkill_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(providers.shutil, "which", lambda _: None)
     monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("WINDIR", raising=False)
+    monkeypatch.setattr(providers.Path, "is_file", lambda self: False)
     with pytest.raises(SecretSourceUnavailable, match="disabled on Windows"):
         providers._windows_taskkill_path()
 

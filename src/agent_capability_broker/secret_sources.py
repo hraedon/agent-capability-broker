@@ -253,9 +253,11 @@ def resolve_suite(cap: Capability, spec: SuiteSecretSpec | None = None) -> dict[
             # value nor a value-bearing backend exception/context.
             for prior in resolved:
                 resolved[prior] = ""
-            raise SecretResolutionError(
+            exc = SecretResolutionError(
                 f"{cap.id}: field {field!r} could not be resolved by provider {provider!r}"
             )
+            exc.__notes__ = []
+            raise exc
     return resolved
 
 

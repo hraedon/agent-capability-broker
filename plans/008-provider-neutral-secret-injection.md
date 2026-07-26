@@ -1,9 +1,10 @@
 # Plan 008 — Provider-neutral suite secret injection
 
-**Status:** In progress 2026-07-17. Public Regista facade, the synthetic,
+**Status:** In progress 2026-07-25. Public Regista facade, the synthetic,
 fail-closed `source = "suite"` injection slice, and the **Codex cred-shim adapter
 (WI-3.1 adapter half)** are implemented; live backend conformance (WI-1.3), the
-live Codex interop proof, and the Windows evidence-lab proof (WI-3.2) remain open.  
+live Codex interop proof, the Windows authenticated-launch boundary (WI-3.2),
+and the Windows evidence-lab proof (WI-3.3) remain open.
 **Author:** GPT-5.6 Sol, from the Windows evidence-lab and Codex readiness audit.  
 **Strategic role:** Let ACB inject credentials from the agent-suite secret
 backend contract without becoming a secret store, printing a resolved value, or
@@ -28,6 +29,15 @@ pulling secret-backend logic into its deterministic read path.
 - A credential may require more than one field (for example, username and
   password). A one-reference/one-value shortcut is insufficient for Windows
   administration.
+- A domain-joined Windows host reached through public-key SSH can identify the
+  caller as a domain principal without holding a reusable domain credential.
+  In that state DC discovery and TCP reachability can succeed while LDAP,
+  SYSVOL, AD PowerShell, and Group Policy operations fail. ACB resolving a
+  credential on the control host does not by itself repair that second hop.
+- Installing an AI harness on the Windows target would not create the missing
+  logon token and would add a second model-authentication and privileged-agent
+  surface. The target needs ACB plus a deterministic qualified child, not
+  Codex, Claude Code, or OpenCode.
 
 ## Decisions
 
@@ -55,6 +65,23 @@ pulling secret-backend logic into its deterministic read path.
 7. **Secret values are not accepted on argv.** ACB rejects manifest options that
    attempt literal credential values and never uses `regista secrets --ref`,
    PowerShell interpolation, or another stdout bridge.
+8. **Resolve on the Windows execution host.** For in-band Windows domain
+   validation, `acb exec` runs on the Windows target and injects the selected
+   credential into an exact component-owned launcher there. Public-key SSH may
+   trigger the value-free command and retrieve sanitized evidence, but it does
+   not carry the credential and is not treated as the authenticated AD
+   execution context.
+9. **The qualified child creates the domain logon.** ACB remains a broker, not
+   a remote-execution or Windows impersonation framework. The component-owned
+   launcher consumes the injected fields and uses a reviewed Windows logon API
+   or equivalently bounded native facility to create a process with reusable
+   domain credentials and a loaded profile. Passing a password in `ssh`,
+   PowerShell, `schtasks`, or another process argv is forbidden.
+10. **Keep the target deterministic.** Routine validation installs ACB, the
+    declared secret provider, and the qualified validator/launcher only. An AI
+    coding harness on the target is neither required nor part of the proof.
+    Interactive agents remain on the control plane; product-specific
+    repositories own validation behavior and evidence semantics.
 
 ## Implemented first-slice manifest shape
 
@@ -247,23 +274,110 @@ does not apply to skills (only hooks/MCP need `/hooks` trust) and generic
 claude/opencode either), so it is deferred as a suite-wide WI, not a codex-only
 one — recorded rather than faked green.
 
-### WI-3.2 — Windows evidence-lab proof
+### WI-3.2 — Windows authenticated-launch boundary
+
+Define and qualify the composition between Windows-local `acb exec` and a
+component-owned validation launcher. ACB owns capability resolution, exact
+`trusted_argv` matching, minimal environment injection, timeout/process-tree
+containment, and value-free provenance. The consuming component (initially
+Windows Evidence Lab, with GPO validation as the first live consumer) owns the
+launcher, creation of the authenticated Windows process, operation allowlist,
+rollback, and evidence reduction.
+
+The intended control flow is:
+
+```text
+control-plane agent
+    -> public-key SSH (value-free trigger)
+    -> Windows-local acb exec
+    -> exact qualified launcher with injected fields
+    -> authenticated local Windows process
+    -> LDAP / SYSVOL / ADWS / GPMC or product operation
+    -> sanitized evidence pack
+```
+
+The launcher must consume credentials only from its declared injected
+environment, construct the authenticated process in memory, and then remove
+credential variables from every environment it controls. If it uses a
+transient scheduled task or service as the native logon facility, registration
+must occur through an API that does not expose the password in argv or generated
+script text, the definition must contain no secret value, and cleanup must be
+verified on success, failure, timeout, and cancellation. A general shell,
+PowerShell interpreter, SSH client, or arbitrary script runner is not a
+qualified `trusted_argv`.
+
+Implementation slices:
+
+1. **ACB Windows-host conformance.** Prove manifest discovery, suite-provider
+   resolution, Windows absolute-path `trusted_argv` matching, minimal child
+   environment, process-tree timeout/cancellation, redacted failures, and
+   provenance when `acb exec` itself is invoked from public-key SSH. This slice
+   belongs in ACB.
+2. **Qualified launcher contract and implementation.** Publish the exact
+   request/result schemas and a fake-launcher conformance fixture in ACB. Build
+   the real Windows launcher in the consuming component, using native APIs
+   directly rather than teaching ACB product operations or accepting arbitrary
+   commands.
+3. **Live composition proof.** Install released artifacts on a resettable
+   synthetic Windows target, invoke the value-free ACB command over SSH, prove
+   authenticated and negative operations, collect the sanitized evidence pack,
+   and verify cleanup. Keep this credential-gated proof out of default CI.
+
+**AC:**
+
+- Starting from a public-key SSH session with no usable domain TGT, the
+  value-free remote invocation causes Windows-local ACB to resolve the declared
+  username/password fields and launch only the exact qualified executable.
+- The authenticated child proves its execution identity and successfully
+  performs allowlisted LDAP, SYSVOL, AD PowerShell, and Group Policy read
+  probes against a synthetic domain. The original SSH process continues to
+  fail the same probes, demonstrating that the result came from the new logon
+  boundary rather than ambient authority.
+- Positive and negative identities are separate capabilities. The delegated
+  validation identity succeeds only for its declared read or disposable-test
+  scope; a standard-user capability fails privileged operations with a typed,
+  redacted authorization result.
+- Secret/password canaries are absent from local and remote argv, command lines,
+  generated scripts, task/service definitions, environment dumps, stdout,
+  stderr, exceptions, ACB provenance, SSH transcripts, Windows event text under
+  the test's control, and returned evidence. The account identifier may appear
+  where Windows security auditing necessarily records the authenticated
+  principal; the runbook classifies and redacts that field rather than claiming
+  it is absent.
+- The launcher has a fixed operation allowlist, bounded input/output,
+  deterministic result schema, timeout, cancellation, process-tree cleanup,
+  and an explicit refusal when the required Windows logon/containment mechanism
+  is unavailable.
+- Reruns are idempotent. No transient task, service, profile artifact, staging
+  credential, or secret-bearing file remains after any terminal outcome.
+- CI covers the contract with synthetic credentials and fake Windows APIs.
+  A separately gated Windows test records OS/tool versions, executable and
+  input digests, capability id and injected field names, correlation id,
+  sanitized probe results, cleanup proof, and evidence hashes—never values.
+- The runbook states explicitly that installing Codex, Claude Code, or OpenCode
+  on the Windows target is unnecessary; doing so cannot substitute for this
+  authenticated-launch proof.
+
+### WI-3.3 — Codex and Windows evidence-lab proof
 
 Run a synthetic evidence-lab command through Codex and ACB using least-privilege
-lab credentials. Correlate cairn tool-call provenance, ACB injection provenance,
-lab scenario id, and evidence-pack id.
+lab credentials through the WI-3.2 Windows-local launch boundary. Correlate
+cairn tool-call provenance, control-plane ACB/SSH invocation, Windows-local ACB
+injection provenance, lab scenario id, and evidence-pack id.
 
 **AC:** the operation succeeds, negative tests fail under the standard-user
 capability, and secret canaries are absent from the Codex transcript, process
 argv, hook inputs/outputs, cairn/regista events, lab logs, and sanitized evidence
-pack.
+pack. The Windows target has no AI harness installed and the original SSH
+session never acquires or receives the domain credential.
 
 ## Sequencing
 
 WI-0.1 is the prerequisite. WI-0.2 and the Codex read-only adapter can proceed
 next. Implement Phase 1 before claiming agent-suite backend parity; implement
-Phase 2 before enabling real lab credentials; finish with the correlated live
-proof in Phase 3.
+Phase 2 before enabling real lab credentials. Complete WI-3.2 before any
+product plan depends on unattended domain-authenticated Windows validation;
+finish with the correlated Codex/evidence-lab proof in WI-3.3.
 
 ## Explicit non-goals
 
@@ -273,3 +387,9 @@ proof in Phase 3.
 - Making doctor perform an authenticated target action to prove a credential.
 - Replacing backend-native least privilege, rotation, access logging, or
   approval controls.
+- Installing, authenticating, or operating an AI coding harness on a Windows
+  validation target.
+- Implementing product-specific validation operations, rollback semantics, or
+  evidence schemas in ACB; those belong to the qualified child.
+- Treating public-key SSH identity, PowerShell remoting identity, or an
+  impersonation-only token as proof of reusable domain credentials.

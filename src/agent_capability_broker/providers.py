@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import time
@@ -827,15 +826,20 @@ def exec_composed(caps: list[Capability], argv: list[str]) -> int:
 
 
 def _windows_taskkill_path() -> str:
-    """Return a trusted taskkill path or fail closed before secret resolution."""
-    found = shutil.which("taskkill.exe") or shutil.which("taskkill")
-    if found:
-        return str(Path(found).resolve())
-    system_root = os.environ.get("SystemRoot")
+    """Return a trusted taskkill path or fail closed before secret resolution.
+
+    Only the system directory is searched — never PATH — so a malicious
+    binary planted earlier in PATH cannot be selected (adversarial review
+    MAJOR-2).  The ``shutil.which`` fallback was removed deliberately.
+    """
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
     if system_root:
         candidate = Path(system_root) / "System32" / "taskkill.exe"
         if candidate.is_file():
             return str(candidate)
+    fallback = Path(r"C:\Windows\System32\taskkill.exe")
+    if fallback.is_file():
+        return str(fallback)
     raise SecretSourceUnavailable(
         "source 'suite' is disabled on Windows because taskkill.exe is unavailable"
     )
@@ -926,12 +930,14 @@ def _run_contained(
             argv,
             env=env,
             creationflags=creation_flag,
+            close_fds=True,
         )
     else:
         process = subprocess.Popen(  # noqa: S603 (exact trusted argv)
             argv,
             env=env,
             start_new_session=True,
+            close_fds=True,
         )
     try:
         returncode = process.wait(timeout=timeout_seconds)
