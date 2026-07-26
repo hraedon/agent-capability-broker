@@ -222,6 +222,11 @@ def parse_manifest(path: Path) -> list[Capability]:
                 f"capability {cap_id!r}: ID prefix {id_prefix!r} does not match "
                 f"declared provider {provider!r}"
             )
+        if "/" in cap_id or "\\" in cap_id or ".." in cap_id:
+            raise ManifestError(
+                f"capability {cap_id!r}: id must not contain path separators or "
+                f"traversal sequences (it flows into harness shim filenames)"
+            )
         harnesses = body.get("harnesses")
         if not isinstance(harnesses, list) or not harnesses:
             raise ManifestError(f"capability {cap_id!r}: 'harnesses' must be a non-empty list")

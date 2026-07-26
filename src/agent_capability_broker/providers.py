@@ -954,6 +954,15 @@ def _run_contained(
     return subprocess.CompletedProcess(argv, returncode)
 
 
+def _assert_safe_path_component(value: str, field: str) -> str:
+    if not value or "/" in value or "\\" in value or value in (".", ".."):
+        raise ValueError(
+            f"{field} {value!r} must be a bare filename with no path separators "
+            f"or traversal (a manifest must not escape its harness directory)"
+        )
+    return value
+
+
 def shim_name(cap: Capability) -> str:
     """The command/skill shim that surfaces `acb exec <cap>` to a harness.
 
@@ -963,9 +972,8 @@ def shim_name(cap: Capability) -> str:
     inventory against.
     """
     shim = cap.options.get("shim")
-    if isinstance(shim, str) and shim:
-        return shim
-    return cap.id.replace(":", "-")
+    name = shim if isinstance(shim, str) and shim else cap.id.replace(":", "-")
+    return _assert_safe_path_component(name, "options.shim / capability id")
 
 
 # Historical private name, kept so existing call sites/tests stay valid.
@@ -983,6 +991,7 @@ def _vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
     base = adapter.vault_env_path
     override = cap.options.get("vault_env")
     if isinstance(override, str) and override:
+        _assert_safe_path_component(override, "options.vault_env")
         return base.parent / override
     return base
 

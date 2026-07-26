@@ -126,3 +126,48 @@ def test_cli_shims_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert rc == 1
     assert payload["gap"] == ["cert-watch-e2e"]
     assert payload["surfaces"]["claude"] == ["start"]
+
+
+class TestShimNameRejectsTraversal:
+    """A manifest must not escape its harness directory via shim/vault_env names."""
+
+    def _cap(self, cap_id: str, **options: object):
+        from agent_capability_broker.model import Capability
+
+        provider = cap_id.split(":", 1)[0] if ":" in cap_id else "cred"
+        return Capability(id=cap_id, provider=provider, harnesses=("opencode",), options=options)
+
+    def test_traversal_in_options_shim_rejected(self) -> None:
+        from agent_capability_broker.providers import shim_name
+
+        with pytest.raises(ValueError, match="bare filename"):
+            shim_name(self._cap("cred:svc", shim="../../etc/evil"))
+
+    def test_traversal_in_capability_id_rejected(self) -> None:
+        from agent_capability_broker.providers import shim_name
+
+        with pytest.raises(ValueError, match="bare filename"):
+            shim_name(self._cap("cred:../evil"))
+
+    def test_safe_shim_name_passes(self) -> None:
+        from agent_capability_broker.providers import shim_name
+
+        assert shim_name(self._cap("cred:svc-bot")) == "cred-svc-bot"
+        assert shim_name(self._cap("cred:svc", shim="cert-watch")) == "cert-watch"
+
+    def test_traversal_in_vault_env_rejected(self, tmp_path: Path) -> None:
+        from agent_capability_broker.providers import _vault_env_path
+
+        adapter = _opencode_tree(tmp_path, [])
+        with pytest.raises(ValueError, match="bare filename"):
+            _vault_env_path(
+                self._cap("cred:svc", vault_env="../other-harness/vault.env"),
+                adapter,
+            )
+
+    def test_safe_vault_env_resolves_under_base(self, tmp_path: Path) -> None:
+        from agent_capability_broker.providers import _vault_env_path
+
+        adapter = _opencode_tree(tmp_path, [])
+        resolved = _vault_env_path(self._cap("cred:svc", vault_env="cert-watch.env"), adapter)
+        assert resolved == adapter.vault_env_path.parent / "cert-watch.env"
