@@ -34,7 +34,7 @@ suite-secrets = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-suite-conformance", marker = "extra == 'dev'", specifier = "==1.0.0" },
+    { name = "agent-suite-conformance", marker = "extra == 'dev'", specifier = "==1.1.0" },
     { name = "hvac", marker = "extra == 'cred'", specifier = ">=2.1,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
@@ -48,11 +48,11 @@ provides-extras = ["dev", "cred", "suite-secrets", "hermes", "narration"]
 
 [[package]]
 name = "agent-suite-conformance"
-version = "1.0.0"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b3/5a/657e429bc9398ae41d91646f28c28cf4e49e46f4f9b3ab4ff40bce33d37c/agent_suite_conformance-1.0.0.tar.gz", hash = "sha256:c986cf6bc5dee522319461c1ee056e24008b503517f17795975151b9af8c2be9", size = 6489, upload-time = "2026-07-21T00:09:16.605Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/a2/d97b5ccc891b84aebd2ef23ff1c87b3e3fd4d080639d18fe646e9e0dc8f6/agent_suite_conformance-1.1.0.tar.gz", hash = "sha256:8105e919b1f039e283122eb32e587769802cdbff9dffa5092dcf31bfd341d0fe", size = 10346, upload-time = "2026-07-30T17:00:02.529Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/e2/08110f18b265aaa6d6caef582b302b3aa34e92df0aff007a0871446dadc3/agent_suite_conformance-1.0.0-py3-none-any.whl", hash = "sha256:dfacbbadf693ee630a59e982c3fff4ab003f69385a2f8b08aa32e5e2709af71e", size = 6462, upload-time = "2026-07-21T00:09:15.389Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/41/08837c32858a2047c83cf4390297ab940475c34a787b806afe3b3adc6a23/agent_suite_conformance-1.1.0-py3-none-any.whl", hash = "sha256:b857955b2d2a6727c7e7204ba2f5e4e08ba05ba586e0d38a879ec3acc6b49991", size = 8916, upload-time = "2026-07-30T17:00:01.599Z" },
 ]
 
 [[package]]
