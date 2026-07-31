@@ -1031,6 +1031,16 @@ def _apply_policy(
             )
         )
         return ApplyResult(action, "applied", f"policy {pname!r} created")
+    if probe.present is None:
+        # We could not read the policy (e.g. the onboarding credential has write
+        # but not read on sys/policies). Say so rather than claiming to have
+        # converged something whose prior state we never saw.
+        return ApplyResult(
+            action,
+            "applied",
+            f"policy {pname!r} written; its prior state could not be read "
+            f"({probe.reason})",
+        )
     return ApplyResult(action, "applied", f"policy {pname!r} converged to manifest scope")
 
 
@@ -1056,7 +1066,15 @@ def _apply_role(
             )
         created = probe.present is False
         status = "applied"
-        detail = f"AppRole {rname!r} " + ("created" if created else "converged")
+        if created:
+            detail = f"AppRole {rname!r} created"
+        elif probe.present is None:
+            detail = (
+                f"AppRole {rname!r} written; its prior state could not be read "
+                f"({probe.reason})"
+            )
+        else:
+            detail = f"AppRole {rname!r} converged"
     if created:
 
         def delete_role() -> object:

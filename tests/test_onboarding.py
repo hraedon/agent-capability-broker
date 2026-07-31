@@ -1353,6 +1353,26 @@ class TestM7ErrorsAndRollback:
             "VAULT_ROLE_ID=old\nVAULT_SECRET_ID=old\n"
         )
 
+    def test_apply_does_not_claim_convergence_it_could_not_verify(
+        self, tmp_path: Path
+    ) -> None:
+        """An unreadable prior state must not be reported as "converged".
+
+        A credential with write-but-not-read on sys/policies cannot see what was
+        there. Writing is still correct; claiming to have converged a state
+        never observed is the over-claiming the review objected to elsewhere.
+        """
+        entry, admin, _ = self._setup(tmp_path)
+        vault = FakeVault(policy_read_error=Forbidden("permission denied"))
+        with patch.object(onboard, "_admin_client", return_value=vault):
+            report = onboard.apply_onboard(entry, admin_env=str(admin))
+        policy_row = next(r for r in report.results if r.action.kind == "create_policy")
+        assert policy_row.status == "applied"
+        assert "prior state could not be read" in policy_row.detail
+        assert "converged" not in policy_row.detail
+        # And nothing was registered for rollback, since we did not create it.
+        vault.sys.delete_policy.assert_not_called()
+
     def test_unwind_leaves_pre_existing_vault_objects_alone(
         self, tmp_path: Path
     ) -> None:
