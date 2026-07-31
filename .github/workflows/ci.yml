@@ -68,3 +68,58 @@ jobs:
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
       - name: Verify uv.lock agrees with pyproject.toml
         run: uv lock --check
+
+  # CLI contract v1 §7 second lane: built wheel installed into a clean venv,
+  # conformance run against installed console entry points. Proves the packaged
+  # artifact (not a source-tree editable install) satisfies the contract — no
+  # src/ shadowing, no missing package-data, no entry-point misconfiguration.
+  # Runs on release tags only (the per-PR lane is the editable-install `test`
+  # job above, which runs the same conformance module in-source).
+  #
+  # Both conformance test files run: test_cli_conformance.py (the kit cases)
+  # and test_conformance_meta_guard.py (the whole-module-skip guard, which
+  # itself re-runs test_cli_conformance.py as a subprocess — proving the guard
+  # executes against the installed wheel, not just in the source-tree lane).
+  conformance-wheel:
+    name: Conformance (built wheel)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist/
+
+      - name: Create clean venv and install wheel + kit
+        run: |
+          python -m venv /tmp/conformance-venv
+          /tmp/conformance-venv/bin/pip install --upgrade pip
+          /tmp/conformance-venv/bin/pip install \
+            dist/*.whl \
+            "agent-suite-conformance==1.1.0" \
+            "pytest>=8.3,<9"
+
+      - name: Run conformance + meta-guard against installed entry points
+        # Preserve the tests/ subdirectory layout so the meta-guard's
+        # REPO_ROOT-relative path (tests/test_cli_conformance.py) resolves.
+        # The source tree is NOT on sys.path: both `agent_capability_broker`
+        # and `agent_suite.conformance` resolve from the clean venv's
+        # site-packages only.
+        run: |
+          mkdir -p /tmp/conformance-run/tests
+          cp tests/test_cli_conformance.py /tmp/conformance-run/tests/
+          cp tests/test_conformance_meta_guard.py /tmp/conformance-run/tests/
+          cd /tmp/conformance-run
+          /tmp/conformance-venv/bin/python -m pytest \
+            tests/test_cli_conformance.py \
+            tests/test_conformance_meta_guard.py \
+            --no-header --color=no -p no:cacheprovider \
+            --tb=short

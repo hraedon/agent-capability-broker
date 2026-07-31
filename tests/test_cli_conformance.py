@@ -1,7 +1,7 @@
 """acb's CLI run through the CLI contract v1 conformance kit (Plan 018 WI-2).
 
 The kit is the centrally versioned package ``agent_suite.conformance``, consumed
-pinned as ``agent-suite-conformance==1.0.0`` from PyPI (Plan 019 B1) via the
+pinned as ``agent-suite-conformance==1.1.0`` from PyPI (Plan 019 B1) via the
 ``[dev]`` extra — never copied, never imported by runtime code. These are acb's
 component-side fixtures against its own CLI.
 
@@ -32,6 +32,7 @@ BrokenPipeCase = conformance.BrokenPipeCase
 ErrorCase = conformance.ErrorCase
 SuccessCase = conformance.SuccessCase
 UsageCase = conformance.UsageCase
+assert_cases_declared = conformance.assert_cases_declared
 run_broken_pipe_case = conformance.run_broken_pipe_case
 run_error_case = conformance.run_error_case
 run_success_case = conformance.run_success_case
@@ -91,6 +92,18 @@ BROKEN_PIPE_CASES = [
         env={"HOME": _EMPTY_HOME},
     ),
 ]
+
+# WI-026 meta-guard: fail collection loudly if any contract dimension empties.
+# A zero-case dimension enforces nothing and — because this module is the
+# kit-importing surface — would be indistinguishable from a pass in green CI.
+# (The whole-module-skip class is covered by test_conformance_meta_guard.py.)
+assert_cases_declared(
+    minimum=1,
+    success=SUCCESS_CASES,
+    error=ERROR_CASES,
+    usage=USAGE_CASES,
+    broken_pipe=BROKEN_PIPE_CASES,
+)
 
 
 @pytest.mark.parametrize("case", SUCCESS_CASES, ids=lambda c: c.name)
