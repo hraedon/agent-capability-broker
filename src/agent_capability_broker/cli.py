@@ -15,10 +15,10 @@ import json
 import os
 import re
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, suppress
 from pathlib import Path
 
-from . import provenance
+from . import onboard, provenance
 from .model import (
     KNOWN_HARNESSES,
     Action,
@@ -45,15 +45,18 @@ def emit_error(
     detail: str | None = None,
     retryable: bool = False,
     exit_code: int = 1,
+    partial: dict[str, int] | None = None,
 ) -> int:
     """Report an operational error per suite CLI contract v1 §3 and return the code.
 
     Under ``--json`` the common error envelope is the single stdout document;
     otherwise the human ``error:`` message goes to *stderr* (acb's existing
     convention). No path prints an error and exits 0. ``exit_code`` defaults to
-    1 — the operational-error slot in the taxonomy (0 success, 2 usage). The
-    envelope shape is validated by ``agent_suite.conformance`` in the tests; it
-    is reproduced here so runtime code never depends on the dev-only kit.
+    1 — the operational-error slot in the taxonomy (0 success, 2 usage).
+    ``partial`` is the contract's ``{"succeeded": n, "failed": m}`` shape for a
+    verb that got part-way (``onboard --apply`` after a rollback). The envelope
+    shape is validated by ``agent_suite.conformance`` in the tests; it is
+    reproduced here so runtime code never depends on the dev-only kit.
     """
     if use_json:
         print(
@@ -65,7 +68,7 @@ def emit_error(
                         "message": message,
                         "detail": detail,
                         "retryable": retryable,
-                        "partial": None,
+                        "partial": partial,
                     },
                 },
                 indent=2,
@@ -873,6 +876,290 @@ def _cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+class _OnboardUsageError(Exception):
+    """A malformed `onboard` invocation: exit 2, per the usage slot."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _read_values_from(spec: str) -> dict[str, str] | None:
+    """Parse ``--values-from`` into a field→value map, or ``None`` for ``none``.
+
+    Never echoes a parsed value, not even in an error message: a JSON decode
+    error's own text can quote the offending document.
+    """
+    if spec == "none":
+        return None
+
+    def _decode(raw: str, origin: str) -> dict[str, str]:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise _OnboardUsageError(
+                "USAGE_ERROR",
+                f"{origin} is not valid JSON (line {exc.lineno}, column {exc.colno})",
+            ) from exc
+        if not isinstance(data, dict):
+            raise _OnboardUsageError(
+                "USAGE_ERROR", f"{origin} must be a JSON object of field→value"
+            )
+        return {str(k): str(v) for k, v in data.items()}
+
+    if spec == "stdin":
+        return _decode(sys.stdin.read(), "stdin")
+    if spec.startswith("file:"):
+        path = Path(spec[len("file:"):])
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise _OnboardUsageError(
+                "USAGE_ERROR",
+                f"cannot read values file {str(path)!r}: "
+                f"{exc.strerror or type(exc).__name__}",
+            ) from exc
+        return _decode(raw, f"values file {str(path)!r}")
+    if spec.startswith("k8s:"):
+        raise _OnboardUsageError(
+            "USAGE_ERROR",
+            "the k8s values source is not implemented yet "
+            "(use stdin or file:<path>)",
+        )
+    raise _OnboardUsageError(
+        "USAGE_ERROR",
+        f"unknown --values-from {spec!r} "
+        f"(expected: none, stdin, file:<path>, k8s:<ns>/<secret>)",
+    )
+
+
+def _onboard_capability(
+    args: argparse.Namespace,
+) -> tuple[Capability, tuple[Capability, ...]]:
+    """The named capability plus the manifest's other entries.
+
+    The siblings drive the shared-access-plane refusal: onboarding must not
+    write a capability-scoped AppRole into a plane file another capability
+    reads (see ``onboard.assert_plane_not_shared``).
+    """
+    cap_id: str = args.capability_id
+    if not _CAPABILITY_ID.match(cap_id):
+        raise _OnboardUsageError(
+            "USAGE_ERROR",
+            f"invalid capability ID {cap_id!r} (must match cred:<name> or e2e:<name>)",
+        )
+    manifest_path = resolve_manifest(args.manifest)
+    caps = parse_manifest(manifest_path)
+    cap = next((c for c in caps if c.id == cap_id), None)
+    if cap is None:
+        raise _OnboardUsageError(
+            "UNKNOWN_CAPABILITY", f"capability {cap_id!r} is not in {manifest_path}"
+        )
+    return cap, tuple(c for c in caps if c.id != cap_id)
+
+
+def _onboard_dry_run(
+    args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
+) -> int:
+    """Render the derived plan. Exit 0 — a dry run that rendered is a success.
+
+    Vault is contacted only when an admin plane was explicitly supplied, in
+    which case each step is annotated with its live state. Without one, this
+    path performs no Vault call and no filesystem write (WI-015 M8: exit 2 no
+    longer doubles as "dry-run succeeded").
+    """
+    plan = onboard.plan_onboard(cap, siblings)
+    states: dict[int, onboard.CheckResult] = {}
+    if args.admin_env or os.environ.get("ACB_VAULT_ADMIN_ENV"):
+        report = onboard.check_onboard(cap, admin_env=args.admin_env, siblings=siblings)
+        states = dict(enumerate(report.results))
+
+    if args.json:
+        print(json.dumps(
+            {
+                "ok": True,
+                "capability": cap.id,
+                "mode": "dry_run",
+                "annotated": bool(states),
+                "plan": [
+                    {
+                        "kind": a.kind,
+                        "harness": a.harness,
+                        "target": a.target,
+                        "summary": a.summary,
+                        "state": states[i].status if i in states else "unknown",
+                        "state_detail": states[i].detail if i in states else
+                                        "not probed (no admin plane supplied)",
+                    }
+                    for i, a in enumerate(plan)
+                ],
+            },
+            indent=2,
+        ))
+        return 0
+
+    print(f"onboarding plan for {cap.id} (dry run — nothing has been changed):\n")
+    for i, a in enumerate(plan):
+        state = f"  [{states[i].status}] {states[i].detail}" if i in states else ""
+        print(f"  [{a.kind}] {a.target}\n      {a.summary}{state}")
+    print("\nRe-run with --apply to perform these steps, or --check to audit "
+          "the live state.")
+    print("Pass --admin-env <file> (or set $ACB_VAULT_ADMIN_ENV) for the "
+          "privileged plane.")
+    return 0
+
+
+def _onboard_check(
+    args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
+) -> int:
+    """Read-only drift report. Exit 0 only when every row is ``ok``.
+
+    An unusable admin plane raises out of ``check_onboard`` and becomes an error
+    envelope below — it is never reported as a clean state (WI-015 M1).
+    """
+    report = onboard.check_onboard(cap, admin_env=args.admin_env, siblings=siblings)
+    if args.json:
+        print(json.dumps(
+            {
+                "ok": report.clean,
+                "capability": cap.id,
+                "mode": "check",
+                "online": report.online,
+                "results": [
+                    {
+                        "kind": r.action.kind,
+                        "harness": r.action.harness,
+                        "target": r.action.target,
+                        "status": r.status,
+                        "detail": r.detail,
+                    }
+                    for r in report.results
+                ],
+            },
+            indent=2,
+        ))
+    else:
+        for r in report.results:
+            line = f"[{r.status.upper()}] {r.action.target}"
+            if r.detail:
+                line += f"  ({r.detail})"
+            print(line)
+        if report.clean:
+            print("onboarding state: clean")
+        else:
+            unknown = sum(1 for r in report.problems if r.status == "unknown")
+            print(
+                f"onboarding state: NOT CLEAN — {len(report.problems)} of "
+                f"{len(report.results)} steps need attention "
+                f"({unknown} could not be verified)"
+            )
+            if not report.online:
+                print(
+                    "no admin plane was supplied, so nothing in Vault was "
+                    "verified; pass --admin-env for a real audit."
+                )
+    return 0 if report.clean else 1
+
+
+def _onboard_apply(
+    args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
+) -> int:
+    values = _read_values_from(args.values_from or "none")
+    report = onboard.apply_onboard(
+        cap, admin_env=args.admin_env, values=values, siblings=siblings
+    )
+    for result in report.results:
+        _emit_onboard_provenance(result)
+
+    if args.json and report.ok:
+        print(json.dumps(
+            {
+                "ok": True,
+                "capability": cap.id,
+                "mode": "apply",
+                "results": [
+                    {
+                        "kind": r.action.kind,
+                        "harness": r.action.harness,
+                        "target": r.action.target,
+                        "status": r.status,
+                        "detail": r.detail,
+                        "backup_path": r.backup_path,
+                    }
+                    for r in report.results
+                ],
+            },
+            indent=2,
+        ))
+        return 0
+    if not args.json:
+        for r in report.results:
+            line = f"[{r.status.upper()}] {r.action.target}: {r.detail or r.action.summary}"
+            if r.backup_path:
+                line += f"  (backup: {r.backup_path})"
+            print(line)
+    if report.ok:
+        return 0
+    failed = report.failed
+    return emit_error(
+        "ONBOARD_FAILED",
+        f"onboarding {cap.id} failed at {failed[0].action.kind} "
+        f"({failed[0].action.target}); {failed[0].detail}",
+        use_json=args.json,
+        detail=(
+            "steps this run had already created were rolled back; see the "
+            "rollback rows"
+        ),
+        partial={"succeeded": len(report.succeeded), "failed": len(failed)},
+    )
+
+
+def _emit_onboard_provenance(result: onboard.ApplyResult) -> None:
+    """Record one onboarding act. Never blocks the act on the sink."""
+    action = Action(
+        capability=result.action.capability,
+        harness=result.action.harness,
+        kind=result.action.kind,
+        target=result.action.target,
+        summary=result.action.summary,
+    )
+    with suppress(OSError):
+        provenance.emit(
+            ActionResult(
+                action=action,
+                status=result.status,
+                detail=result.detail,
+                backup_path=result.backup_path,
+            ),
+            purpose="onboard",
+        )
+
+
+def _cmd_onboard(args: argparse.Namespace) -> int:
+    """`acb onboard` — exit 0 success, 1 operational, 2 usage (contract §3)."""
+    try:
+        cap, siblings = _onboard_capability(args)
+        if args.check and args.apply:
+            raise _OnboardUsageError(
+                "USAGE_ERROR", "--check and --apply are mutually exclusive"
+            )
+        if args.check:
+            return _onboard_check(args, cap, siblings)
+        if args.apply:
+            return _onboard_apply(args, cap, siblings)
+        return _onboard_dry_run(args, cap, siblings)
+    except _OnboardUsageError as exc:
+        return emit_error(exc.code, str(exc), use_json=args.json, exit_code=2)
+    except ManifestError as exc:
+        return emit_error("MANIFEST_ERROR", str(exc), use_json=args.json)
+    except onboard.OnboardRefusal as exc:
+        return emit_error("ONBOARD_REFUSED", str(exc), use_json=args.json)
+    except onboard.OnboardError as exc:
+        return emit_error(
+            "ONBOARD_ERROR", str(exc), use_json=args.json, retryable=exc.retryable
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -954,6 +1241,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reg.add_argument("--json", action="store_true", help="emit the result as JSON")
     reg.set_defaults(func=_cmd_register)
+
+    ob = sub.add_parser(
+        "onboard",
+        help="provision the Vault structure a cred capability declares "
+             "(dry-run unless --apply)",
+    )
+    ob.add_argument("capability_id", help="capability ID (e.g. cred:lab-hyperv-control)")
+    ob.add_argument(
+        "-m", "--manifest", default=None,
+        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
+    )
+    ob.add_argument(
+        "--check", action="store_true",
+        help="read-only drift report; exit 1 unless every derived step is verified ok",
+    )
+    ob.add_argument(
+        "--apply", action="store_true",
+        help="perform the provisioning steps (default: dry-run)",
+    )
+    ob.add_argument(
+        "--admin-env", default=None,
+        help="privileged plane file (admin token or a dedicated onboarding AppRole; "
+             "or set $ACB_VAULT_ADMIN_ENV). An ambient VAULT_TOKEN/VAULT_ADDR is "
+             "never used.",
+    )
+    ob.add_argument(
+        "--values-from", default=None,
+        help="value source: none (default), stdin, file:<path>, k8s:<ns>/<secret>",
+    )
+    ob.add_argument("--json", action="store_true", help="emit the result as JSON")
+    ob.set_defaults(func=_cmd_onboard)
 
     return parser
 
