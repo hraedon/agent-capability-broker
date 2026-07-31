@@ -1172,6 +1172,9 @@ def _revoke_stale_secret_id(client: object, rname: str, stale: str) -> str:
         resp = client.auth.approle.read_secret_id(  # type: ignore[attr-defined]
             role_name=rname, secret_id=stale
         )
+        # Vault answers an unknown/destroyed SecretID with 204 No Content, which
+        # hvac surfaces as a `requests.Response`, not a dict (verified live). The
+        # isinstance guard is what keeps that from raising.
         data = resp.get("data") if isinstance(resp, dict) else None
         accessor = data.get("secret_id_accessor") if isinstance(data, dict) else None
         if not isinstance(accessor, str) or not accessor:
@@ -1212,6 +1215,24 @@ def _apply_kv(
                 "skipped",
                 f"{vault_path} already holds a value — never overwritten "
                 f"(cas=0 rejected by Vault)",
+            )
+        if _sanitize(exc) in _DENIED_EXC_NAMES:
+            # Verified against live Vault: a credential granted only `create` on
+            # kv/data/<path> gets Forbidden — not a cas conflict — on the second
+            # write, because KV v2 needs `update` to add a version. So this is
+            # ambiguous between "the policy is too narrow" and "the path already
+            # holds a value and the credential is create-only". Fail closed and
+            # name both, rather than reporting a success that may not be one:
+            # either way nothing was written, so the guarantee still holds.
+            return ApplyResult(
+                action,
+                "failed",
+                f"KV write to {vault_path} denied (Forbidden); no value was "
+                f"written, so any existing value is intact. Either the "
+                f"onboarding credential lacks create/update on the path, or it "
+                f"holds 'create' only and the path already has a version "
+                f"(KV v2 requires 'update' to write one). Grant "
+                f"[\"create\", \"update\"] so cas=0 can report the difference",
             )
         return ApplyResult(action, "failed", f"KV write failed ({_sanitize(exc)})")
     return ApplyResult(action, "applied", f"value written to {vault_path}")

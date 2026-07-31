@@ -171,12 +171,24 @@ path "auth/approle/role/acb-*/role-id"   { capabilities = ["read"] }
 path "auth/approle/role/acb-*/secret-id" { capabilities = ["create", "update"] }
 path "auth/approle/role/acb-*/secret-id/lookup"            { capabilities = ["create", "update"] }
 path "auth/approle/role/acb-*/secret-id-accessor/destroy"   { capabilities = ["create", "update"] }
-path "<mount>/data/<path>"           { capabilities = ["create"] }
+path "<mount>/data/<path>"           { capabilities = ["create", "update"] }
 ```
 
 Note what is *absent*: no `read` on `<mount>/data/*` and no `<mount>/metadata/*`.
 Such a credential cannot read the metadata probe — by design — which is why
-never-overwrite rests on `cas=0` rather than on the probe.
+never-overwrite rests on `cas=0` rather than on the probe.  Verified against
+this estate's Vault: that credential's metadata probe returns
+`permission denied`, its first `cas=0` write succeeds, and its second is
+rejected as `InvalidRequest: check-and-set parameter did not match the current
+version`.
+
+`["create"]` alone is stricter still — such a credential physically cannot add a
+version — but it is *less* legible: KV v2 requires `update` to write a new
+version, so Vault denies at the ACL layer before evaluating `cas`, and the
+result is `Forbidden` rather than a CAS conflict.  acb cannot then distinguish
+"the path already holds a value" from "the policy is too narrow", so it fails
+closed and reports both possibilities.  Nothing is written either way, so the
+never-overwrite guarantee holds under both grants; only the diagnostic differs.
 
 ## Exit codes
 

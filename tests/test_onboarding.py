@@ -948,6 +948,29 @@ class TestM4NeverOverwrite:
         assert kv_row.status == "applied"
         assert "kv/agent-suite/qual/bot" in vault.kv
 
+    def test_create_only_credential_fails_closed_not_open(
+        self, tmp_path: Path
+    ) -> None:
+        """Live-verified: a `create`-only credential gets Forbidden, not a CAS
+        conflict, on the second write — KV v2 needs `update` to add a version, so
+        Vault denies at the ACL layer before evaluating cas.
+
+        That is ambiguous between "path already has a value" and "policy too
+        narrow", so it must fail closed and name both. What it must never do is
+        report success, and nothing may be written either way.
+        """
+        vault = FakeVault(
+            metadata_error=Forbidden("permission denied"),
+            kv_write_error=Forbidden("permission denied"),
+        )
+        report = self._apply(tmp_path, vault)
+        kv_row = next(r for r in report.results if r.action.kind == "write_kv")
+        assert kv_row.status == "failed"
+        assert "no value was written" in kv_row.detail
+        assert '["create", "update"]' in kv_row.detail
+        assert not report.ok
+        assert vault.written_secrets == []
+
     def test_values_from_none_writes_nothing(self, tmp_path: Path) -> None:
         vault = FakeVault()
         report = self._apply(tmp_path, vault, values={})
