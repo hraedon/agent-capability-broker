@@ -510,10 +510,13 @@ def _admin_client(plane: AdminPlane) -> object:
         _authenticate(client, plane.env)
         authenticated = bool(client.is_authenticated())
     except RuntimeError as exc:
-        # cred_vault._authenticate's own "no auth available" signal.
-        raise OnboardRefusal(
-            f"admin plane {str(plane.path)!r}: {exc}"
-        ) from exc
+        # `cred_vault._authenticate` signals "no auth method available" with a
+        # plain RuntimeError whose message is worth surfacing. Only the *exact*
+        # class is trusted for that: a subclass could be raised by anything
+        # further down (an auth backend, a wrapper) and carry request material,
+        # and this module's rule is that upstream text never reaches output.
+        detail = str(exc) if type(exc) is RuntimeError else _sanitize(exc)
+        raise OnboardRefusal(f"admin plane {str(plane.path)!r}: {detail}") from exc
     except Exception as exc:
         if _is_retryable(exc):
             raise OnboardError(
@@ -807,7 +810,7 @@ def check_onboard(
                     results.append(CheckResult(action, "ok", "AppRole present and bound"))
 
         elif action.kind == "write_plane_env":
-            results.append(_check_plane(action, role_id, plane))
+            results.append(_check_plane(action, role_id, plane, online=client is not None))
 
         elif action.kind == "write_kv":
             if client is None:
@@ -847,7 +850,11 @@ def _read_role_id(client: object, rname: str) -> str | None:
 
 
 def _check_plane(
-    action: OnboardAction, role_id: str | None, plane: AdminPlane | None
+    action: OnboardAction,
+    role_id: str | None,
+    plane: AdminPlane | None,
+    *,
+    online: bool,
 ) -> CheckResult:
     """Plane-file row. Locally knowable facts are reported even offline."""
     path = Path(str(action.payload["plane_env"]))
@@ -872,8 +879,11 @@ def _check_plane(
         return CheckResult(
             action,
             "unknown",
-            "plane file present and complete; role_id match needs a reachable "
-            "admin plane",
+            "plane file present and complete; the AppRole it should name does "
+            "not exist yet, so the binding cannot be confirmed"
+            if online
+            else "plane file present and complete; role_id match needs a "
+            "reachable admin plane",
         )
     if existing.get("VAULT_ROLE_ID") != role_id:
         return CheckResult(

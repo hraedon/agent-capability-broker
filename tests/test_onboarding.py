@@ -806,6 +806,27 @@ class TestM1CheckVerifiesSomething:
         assert row.status == "drift"
         assert "0644" in row.detail
 
+    def test_online_check_says_why_a_plane_binding_is_unconfirmed(
+        self, tmp_path: Path
+    ) -> None:
+        """Online with the AppRole absent is a different fact from offline."""
+        manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
+        entry = parse_manifest(manifest)[0]
+        admin = write_admin_env(tmp_path)
+        plane = onboard.plane_targets(entry)[0].path
+        plane.parent.mkdir(parents=True, exist_ok=True)
+        plane.write_text(
+            f"VAULT_ADDR={VAULT_ADDR}\nVAULT_ROLE_ID=r\nVAULT_SECRET_ID=s\n",
+            encoding="utf-8",
+        )
+        plane.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        with patch.object(onboard, "_admin_client", return_value=FakeVault()):
+            report = onboard.check_onboard(entry, admin_env=str(admin))
+        row = next(r for r in report.results if r.action.kind == "write_plane_env")
+        assert row.status == "unknown"
+        assert "does not exist yet" in row.detail
+        assert not report.clean
+
     def test_denied_kv_metadata_is_unknown_never_ok(self, tmp_path: Path) -> None:
         """A probe that could not look must not be scored as verified."""
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
@@ -1646,6 +1667,46 @@ class TestNoSecretsInOutput:
         captured = capsys.readouterr()
         assert code == 2
         assert CANARY not in captured.out + captured.err
+
+    def test_runtime_error_subclass_from_auth_is_sanitized(
+        self, tmp_path: Path
+    ) -> None:
+        """`_admin_client` surfaces cred_vault's own RuntimeError message.
+
+        Only the exact class earns that. A subclass could come from an auth
+        backend and carry request material, so it must be reduced to its name.
+        """
+        pytest.importorskip("hvac")
+        admin = write_admin_env(tmp_path)
+        plane = onboard.load_admin_plane(str(admin))
+        assert plane is not None
+
+        class LeakyAuthError(RuntimeError):
+            pass
+
+        client = MagicMock()
+        client.is_authenticated.side_effect = LeakyAuthError(
+            f"login failed for secret_id={CANARY}"
+        )
+        with patch("hvac.Client", return_value=client):
+            with pytest.raises(onboard.OnboardRefusal) as excinfo:
+                onboard._admin_client(plane)
+        assert CANARY not in str(excinfo.value)
+        assert "LeakyAuthError" in str(excinfo.value)
+
+    def test_exact_runtime_error_message_is_surfaced(self, tmp_path: Path) -> None:
+        """The positive control: the useful diagnostic is not lost."""
+        pytest.importorskip("hvac")
+        admin = write_admin_env(tmp_path)
+        plane = onboard.load_admin_plane(str(admin))
+        assert plane is not None
+        client = MagicMock()
+        client.is_authenticated.side_effect = RuntimeError(
+            "no Vault auth available (tried k8s service-account, AppRole, VAULT_TOKEN)"
+        )
+        with patch("hvac.Client", return_value=client):
+            with pytest.raises(onboard.OnboardRefusal, match="no Vault auth available"):
+                onboard._admin_client(plane)
 
     def test_sanitize_returns_only_a_class_name(self) -> None:
         assert onboard._sanitize(InvalidRequest(f"password={CANARY}")) == (
