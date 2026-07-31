@@ -933,7 +933,15 @@ def _read_values_from(spec: str) -> dict[str, str] | None:
     )
 
 
-def _onboard_capability(args: argparse.Namespace) -> Capability:
+def _onboard_capability(
+    args: argparse.Namespace,
+) -> tuple[Capability, tuple[Capability, ...]]:
+    """The named capability plus the manifest's other entries.
+
+    The siblings drive the shared-access-plane refusal: onboarding must not
+    write a capability-scoped AppRole into a plane file another capability
+    reads (see ``onboard.assert_plane_not_shared``).
+    """
     cap_id: str = args.capability_id
     if not _CAPABILITY_ID.match(cap_id):
         raise _OnboardUsageError(
@@ -947,10 +955,12 @@ def _onboard_capability(args: argparse.Namespace) -> Capability:
         raise _OnboardUsageError(
             "UNKNOWN_CAPABILITY", f"capability {cap_id!r} is not in {manifest_path}"
         )
-    return cap
+    return cap, tuple(c for c in caps if c.id != cap_id)
 
 
-def _onboard_dry_run(args: argparse.Namespace, cap: Capability) -> int:
+def _onboard_dry_run(
+    args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
+) -> int:
     """Render the derived plan. Exit 0 — a dry run that rendered is a success.
 
     Vault is contacted only when an admin plane was explicitly supplied, in
@@ -958,10 +968,10 @@ def _onboard_dry_run(args: argparse.Namespace, cap: Capability) -> int:
     path performs no Vault call and no filesystem write (WI-015 M8: exit 2 no
     longer doubles as "dry-run succeeded").
     """
-    plan = onboard.plan_onboard(cap)
+    plan = onboard.plan_onboard(cap, siblings)
     states: dict[int, onboard.CheckResult] = {}
     if args.admin_env or os.environ.get("ACB_VAULT_ADMIN_ENV"):
-        report = onboard.check_onboard(cap, admin_env=args.admin_env)
+        report = onboard.check_onboard(cap, admin_env=args.admin_env, siblings=siblings)
         states = dict(enumerate(report.results))
 
     if args.json:
@@ -999,13 +1009,15 @@ def _onboard_dry_run(args: argparse.Namespace, cap: Capability) -> int:
     return 0
 
 
-def _onboard_check(args: argparse.Namespace, cap: Capability) -> int:
+def _onboard_check(
+    args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
+) -> int:
     """Read-only drift report. Exit 0 only when every row is ``ok``.
 
     An unusable admin plane raises out of ``check_onboard`` and becomes an error
     envelope below — it is never reported as a clean state (WI-015 M1).
     """
-    report = onboard.check_onboard(cap, admin_env=args.admin_env)
+    report = onboard.check_onboard(cap, admin_env=args.admin_env, siblings=siblings)
     if args.json:
         print(json.dumps(
             {
@@ -1049,9 +1061,13 @@ def _onboard_check(args: argparse.Namespace, cap: Capability) -> int:
     return 0 if report.clean else 1
 
 
-def _onboard_apply(args: argparse.Namespace, cap: Capability) -> int:
+def _onboard_apply(
+    args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
+) -> int:
     values = _read_values_from(args.values_from or "none")
-    report = onboard.apply_onboard(cap, admin_env=args.admin_env, values=values)
+    report = onboard.apply_onboard(
+        cap, admin_env=args.admin_env, values=values, siblings=siblings
+    )
     for result in report.results:
         _emit_onboard_provenance(result)
 
@@ -1122,16 +1138,16 @@ def _emit_onboard_provenance(result: onboard.ApplyResult) -> None:
 def _cmd_onboard(args: argparse.Namespace) -> int:
     """`acb onboard` — exit 0 success, 1 operational, 2 usage (contract §3)."""
     try:
-        cap = _onboard_capability(args)
+        cap, siblings = _onboard_capability(args)
         if args.check and args.apply:
             raise _OnboardUsageError(
                 "USAGE_ERROR", "--check and --apply are mutually exclusive"
             )
         if args.check:
-            return _onboard_check(args, cap)
+            return _onboard_check(args, cap, siblings)
         if args.apply:
-            return _onboard_apply(args, cap)
-        return _onboard_dry_run(args, cap)
+            return _onboard_apply(args, cap, siblings)
+        return _onboard_dry_run(args, cap, siblings)
     except _OnboardUsageError as exc:
         return emit_error(exc.code, str(exc), use_json=args.json, exit_code=2)
     except ManifestError as exc:
