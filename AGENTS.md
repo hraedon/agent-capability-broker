@@ -92,6 +92,24 @@ A provider implements: `inspect` (read-only status for a capability×harness),
   cred is `ABSENT` in a harness until a command/skill shim surfaces `acb exec
   cred:<name>` there; `reconcile` renders it, broker reachability (token
   self-lookup) gives `PRESENT_OK`/`PRESENT_BROKEN`.
+
+  **Vault auth vocabulary and its two invariants (WI-016).** `cred_vault` reads
+  `VAULT_ADDR`, `VAULT_ROLE_ID` / `VAULT_ROLE_ID_FILE`, `VAULT_SECRET_ID` /
+  `VAULT_SECRET_ID_FILE` (the file form wins — it is what a mode-0600 delivery
+  writes to, and it keeps the value out of `/proc/<pid>/environ`),
+  `VAULT_APPROLE_MOUNT_POINT` (default `approle`), `VAULT_K8S_ROLE`, and
+  `VAULT_TOKEN` (dev only). These are Vault's own namespace, deliberately the
+  same names `regista._secrets` reads (regista WI-228), so **one** plane file —
+  the one `acb onboard` writes — serves both components; `ACB_VAULT_ENV` (acb)
+  and `VAULT_ENV_FILE` (regista) are each component's pointer *at* that file.
+  (1) The hvac client is built with `token=""`, never `None`: `None` makes hvac
+  read `$VAULT_TOKEN` **and** `~/.vault-token`, which would let a stray
+  developer token make a capability look reachable on an AppRole-only host.
+  (2) AppRole material that is declared but incomplete or unreadable **fails
+  closed** — it never falls back to a token. regista refuses identically; two
+  components on one host disagreeing about that host's posture is worse than
+  either choice alone. acb does **not** unwrap response-wrapped SecretIDs
+  (`VAULT_SECRET_ID_RESPONSE_WRAPPED` is a named refusal, not a Vault 400).
 - **`e2e`** — provisions/locates a Playwright browser (local install or a remote
   endpoint) and exposes it to a harness without a fragile per-session `npx` MCP.
   `exec` brokers the resolved browser into the child (`ACB_E2E_EXECUTABLE` /

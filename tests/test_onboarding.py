@@ -1042,6 +1042,28 @@ class TestM5NoAmbientCredentials:
         with pytest.raises(onboard.OnboardRefusal, match="never picked up"):
             onboard.load_admin_plane(str(admin))
 
+    def test_partial_approle_material_is_refused_even_beside_a_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WI-016: the admin plane inherits `cred_vault`'s fail-closed rule.
+
+        A privileged file that half-describes an AppRole is a mistake to surface,
+        not a reason to quietly authenticate with the token sitting beside it.
+        """
+        pytest.importorskip("hvac")
+        admin = write_admin_env(tmp_path, token="admin-token", role_id="admin-role")
+        plane = onboard.load_admin_plane(str(admin))
+        assert plane is not None
+
+        constructed = MagicMock()
+        constructed.is_authenticated.return_value = True
+        with patch("hvac.Client", return_value=constructed):
+            with pytest.raises(onboard.OnboardRefusal) as exc:
+                onboard._admin_client(plane)
+        assert "no SecretID" in str(exc.value)
+        assert "the admin plane file" in str(exc.value)
+        constructed.auth.approle.login.assert_not_called()
+
     def test_ambient_token_does_not_reach_the_client(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
