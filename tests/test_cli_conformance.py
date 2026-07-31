@@ -19,6 +19,7 @@ live cred-skill validation, so no ErrorCase is asserted over those verbs here.
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 
@@ -59,6 +60,46 @@ _HERMETIC_UNSET = (
 # A manifest path that cannot resolve, forcing the documented operational error.
 _MISSING_MANIFEST = "/nonexistent/acb-conformance/capabilities.toml"
 
+# Plan 009 `onboard` fixtures (acb WI-015 M8: the verb shipped with zero
+# conformance cases and an exit 2 that meant three different things).
+#
+# `onboard`'s dry-run is hermetic by construction: without --admin-env it makes
+# no Vault call and no filesystem write, so it is a legitimate SuccessCase. The
+# manifest declares `vault_env` so the derived plane path is a dedicated file
+# beside the (empty, nonexistent) harness config rather than a shared one.
+_ONBOARD_DIR = tempfile.mkdtemp(prefix="acb-conformance-onboard-")
+_ONBOARD_MANIFEST = os.path.join(_ONBOARD_DIR, "capabilities.toml")
+with open(_ONBOARD_MANIFEST, "w", encoding="utf-8") as _fh:
+    _fh.write(
+        '[capability."cred:conformance-bot"]\n'
+        'provider = "cred"\n'
+        'harnesses = ["claude"]\n'
+        'vault = "kv/agent-suite/qual/conformance-bot"\n'
+        'fields = ["username", "password"]\n'
+        'vault_env = "conformance-bot.env"\n'
+        "\n"
+        # A suite-source capability: the documented planning-time refusal, and
+        # the hermetic operational-error path for this verb.
+        '[capability."cred:conformance-suite"]\n'
+        'provider = "cred"\n'
+        'harnesses = ["claude"]\n'
+        'source = "suite"\n'
+        'vault = "kv/agent-suite/qual/conformance-suite"\n'
+        'fields = ["username"]\n'
+    )
+
+# An admin-plane path that cannot exist: `onboard --check` must treat it as an
+# error rather than degrading to an offline "clean" report.
+_MISSING_ADMIN_ENV = os.path.join(_ONBOARD_DIR, "no-such-admin.env")
+
+# An admin plane that declares an address but no auth material. This is the M5
+# case: `hvac.Client(url, token=None)` would fall back to $VAULT_TOKEN and then
+# ~/.vault-token, so the ambient sentinel the ErrorCase injects is genuinely in
+# scope here. acb must refuse *and* must not echo the sentinel.
+_ADDR_ONLY_ADMIN_ENV = os.path.join(_ONBOARD_DIR, "addr-only-admin.env")
+with open(_ADDR_ONLY_ADMIN_ENV, "w", encoding="utf-8") as _fh:
+    _fh.write("VAULT_ADDR=http://127.0.0.1:8200\n")
+
 
 SUCCESS_CASES = [
     # `shims --json` is a pure filesystem read: no store, no manifest, JSON out.
@@ -67,6 +108,18 @@ SUCCESS_CASES = [
         argv=(*_CLI, "shims", "--json"),
         env={"HOME": _EMPTY_HOME},
         unset_env=_HERMETIC_UNSET,
+    ),
+    # `onboard` dry-run: derives the plan, contacts nothing, exit 0. Pins the
+    # taxonomy fix — this path used to exit 2 ("dry-run success"), colliding
+    # with both refusal and usage.
+    SuccessCase(
+        name="onboard-dry-run-json",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-bot",
+            "--manifest", _ONBOARD_MANIFEST, "--json",
+        ),
+        env={"HOME": _EMPTY_HOME},
+        unset_env=(*_HERMETIC_UNSET, "ACB_VAULT_ADMIN_ENV", "ACB_VAULT_ENV"),
     ),
 ]
 
@@ -79,10 +132,79 @@ ERROR_CASES = [
         expect_code="MANIFEST_ERROR",
         unset_env=_HERMETIC_UNSET,
     ),
+    # A planning-time refusal is operational (1), not usage (2).
+    ErrorCase(
+        name="onboard-refused-non-vault-source",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-suite",
+            "--manifest", _ONBOARD_MANIFEST, "--json",
+        ),
+        expect_code="ONBOARD_REFUSED",
+        env={"HOME": _EMPTY_HOME},
+        unset_env=(*_HERMETIC_UNSET, "ACB_VAULT_ADMIN_ENV"),
+    ),
+    # `--check` with an unusable admin plane must be an error, never a clean
+    # report (M1: the drift gate that went green with authentication broken).
+    ErrorCase(
+        name="onboard-check-broken-admin-plane",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-bot",
+            "--manifest", _ONBOARD_MANIFEST, "--check",
+            "--admin-env", _MISSING_ADMIN_ENV, "--json",
+        ),
+        expect_code="ONBOARD_REFUSED",
+        env={"HOME": _EMPTY_HOME},
+        unset_env=_HERMETIC_UNSET,
+    ),
+    # `--check` offline verified nothing, so it must not report success.
+    ErrorCase(
+        name="onboard-check-offline-is-not-clean",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-bot",
+            "--manifest", _ONBOARD_MANIFEST, "--check",
+        ),
+        expect_code=None,
+        json_mode=False,
+        env={"HOME": _EMPTY_HOME},
+        unset_env=(*_HERMETIC_UNSET, "ACB_VAULT_ADMIN_ENV"),
+    ),
+    # `--apply` against an admin plane that declares no auth material: refuse,
+    # rather than borrowing the ambient VAULT_TOKEN, and do not echo it. The kit
+    # sets both names to its sentinel and fails the case if either surfaces.
+    ErrorCase(
+        name="onboard-apply-refuses-without-leaking-ambient-token",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-bot",
+            "--manifest", _ONBOARD_MANIFEST, "--apply",
+            "--admin-env", _ADDR_ONLY_ADMIN_ENV, "--json",
+        ),
+        expect_code="ONBOARD_REFUSED",
+        env={"HOME": _EMPTY_HOME},
+        unset_env=_HERMETIC_UNSET,
+        secret_env_names=("VAULT_TOKEN", "VAULT_SECRET_ID"),
+    ),
 ]
 
 USAGE_CASES = [
     UsageCase(name="unknown-verb", argv=(*_CLI, "bogusverb")),
+    # Exit 2 is now *only* usage for this verb.
+    UsageCase(name="onboard-invalid-capability-id", argv=(*_CLI, "onboard", "bogus")),
+    UsageCase(
+        name="onboard-mutually-exclusive-modes",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-bot",
+            "--manifest", _ONBOARD_MANIFEST, "--check", "--apply",
+        ),
+    ),
+    UsageCase(
+        name="onboard-unknown-values-source",
+        argv=(
+            *_CLI, "onboard", "cred:conformance-bot",
+            "--manifest", _ONBOARD_MANIFEST, "--apply",
+            "--values-from", "bogus-source",
+        ),
+    ),
+    UsageCase(name="onboard-missing-capability-argument", argv=(*_CLI, "onboard")),
 ]
 
 BROKEN_PIPE_CASES = [
