@@ -470,17 +470,23 @@ def load_admin_plane(admin_env: str | os.PathLike[str] | None = None) -> AdminPl
             f"admin plane {str(path)!r} does not set VAULT_ADDR (an ambient "
             f"VAULT_ADDR is never used — the privileged plane is explicit)"
         )
+    # The `*_FILE` forms are the same AppRole vocabulary `cred_vault` (and
+    # regista) read, so a plane written in the preferred file shape counts as
+    # declared material here too. Completeness is still checked — but by
+    # `cred_vault._approle_material`, which names the missing piece.
+    role_id = env.get("VAULT_ROLE_ID") or env.get("VAULT_ROLE_ID_FILE")
+    secret_id = env.get("VAULT_SECRET_ID") or env.get("VAULT_SECRET_ID_FILE")
     has_auth = bool(
         env.get("VAULT_TOKEN")
-        or (env.get("VAULT_ROLE_ID") and env.get("VAULT_SECRET_ID"))
+        or (role_id and secret_id)
         or env.get("VAULT_K8S_ROLE")
     )
     if not has_auth:
         raise OnboardRefusal(
             f"admin plane {str(path)!r} declares no auth material (expected "
-            f"VAULT_TOKEN, or VAULT_ROLE_ID + VAULT_SECRET_ID, or "
-            f"VAULT_K8S_ROLE) — an ambient $VAULT_TOKEN or ~/.vault-token is "
-            f"never picked up"
+            f"VAULT_TOKEN, or VAULT_ROLE_ID + VAULT_SECRET_ID (or their "
+            f"*_FILE forms), or VAULT_K8S_ROLE) — an ambient $VAULT_TOKEN or "
+            f"~/.vault-token is never picked up"
         )
     return AdminPlane(path=path, addr=addr, env=env)
 
@@ -507,7 +513,7 @@ def _admin_client(plane: AdminPlane) -> object:
 
     client = hvac.Client(url=plane.addr, token=plane.env.get("VAULT_TOKEN") or "")
     try:
-        _authenticate(client, plane.env)
+        _authenticate(client, plane.env, source="the admin plane file")
         authenticated = bool(client.is_authenticated())
     except RuntimeError as exc:
         # `cred_vault._authenticate` signals "no auth method available" with a
