@@ -122,7 +122,9 @@ and reconciles reality to it.
 ## Boundary with sibling tools
 
 - **Secret backends** retain custody. The legacy Vault path authenticates through
-  k8s auth → AppRole `.env` → `VAULT_TOKEN`; `source = "suite"` delegates explicit
+  k8s auth → AppRole `.env` → `VAULT_TOKEN` — in that order, never picking up an
+  ambient `$VAULT_TOKEN`/`~/.vault-token`, and refusing rather than downgrading
+  when AppRole material is declared but incomplete; `source = "suite"` delegates explicit
   provider refs to Regista's public resolver. ACB brokers credential use
   without storing any value itself.
 - **regista / agent-provenance** receive `acb`'s provenance events; a brokered

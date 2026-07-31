@@ -135,7 +135,11 @@ First two providers:
   but never resolves a value. Suite execution additionally requires an absolute
   `trusted_argv` whose complete argv must match exactly before resolution. ACB
   supplies a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
-  the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`. Because cred
+  the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`, where
+  AppRole strictly precedes the token and **declared-but-incomplete AppRole
+  material refuses** rather than downgrading to a token (WI-016; the plane
+  vocabulary and both no-ambient-credential invariants are in `AGENTS.md` under
+  the `cred` provider). Because cred
   has no per-harness config artifact, discoverability has **two axes** (Plan 004):
   a cred is `ABSENT` in a harness until that harness exposes a command/skill shim
   surfacing `acb exec cred:<name>`, and once present, a read-only **broker

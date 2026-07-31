@@ -77,6 +77,7 @@ Planning-time — no I/O, checked before any Vault contact:
 | Admin plane file absent, unreadable, or not UTF-8 | refuse |
 | Admin plane declares no `VAULT_ADDR` | refuse (an ambient `VAULT_ADDR` is never used) |
 | Admin plane declares no auth material | refuse (an ambient `$VAULT_TOKEN`/`~/.vault-token` is never used) |
+| Admin plane declares partial AppRole material | refuse, naming the missing piece (never a fall-back to a token) |
 | Admin plane fails to authenticate | refuse — **never** a degrade to offline |
 | Vault unreachable | operational error, `retryable: true` |
 
@@ -152,8 +153,15 @@ not by content.
 
 Onboarding requires `--admin-env <file>` or `$ACB_VAULT_ADMIN_ENV`: a file
 declaring `VAULT_ADDR` plus one of `VAULT_TOKEN`, `VAULT_ROLE_ID` +
-`VAULT_SECRET_ID`, or `VAULT_K8S_ROLE`.  The capability's own plane is never used
-to create itself.
+`VAULT_SECRET_ID` (or their `*_FILE` forms), or `VAULT_K8S_ROLE`.  The
+capability's own plane is never used to create itself.
+
+Auth itself is `cred_vault._authenticate`, shared with the runtime path, so the
+admin plane inherits its fail-closed rule (WI-016): an admin file that declares
+*some* AppRole material — a `VAULT_ROLE_ID` with no SecretID, say — is refused
+naming the missing piece, even when it also declares a `VAULT_TOKEN`.  A
+privileged plane that half-describes an AppRole is a mistake to surface, not a
+reason to quietly use the token instead.
 
 Both the address and the credential come from that file.  `hvac.Client` is
 constructed with `token=""` — not `None` — because `None` triggers hvac's
