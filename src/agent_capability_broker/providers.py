@@ -986,13 +986,20 @@ def shim_name(cap: Capability) -> str:
 _cred_shim_name = shim_name
 
 
-def _vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
+def vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
     """The `.env` file the shim should point `ACB_VAULT_ENV` at.
 
     Defaults to the adapter's `vault_env_path` (beside the harness config). A
     capability may override with `options.vault_env` (a bare filename resolved
     against the same dir) to use a different AppRole per access plane — e.g.
     homelab AD creds via `vault.env`, cert-watch test creds via `cert-watch.env`.
+
+    This is the **single** resolver for the plane file's location: shim
+    rendering, `doctor`'s per-plane reachability probe, and `onboard`'s write
+    path all call it (Plan 009 / WI-015 M3). Anything that derives the path
+    independently can — and did — onboard a capability into a file the runtime
+    never reads. `_assert_safe_path_component` keeps `options.vault_env` a bare
+    filename on the write side too (the class fixed in 4d6e376).
     """
     base = adapter.vault_env_path
     override = cap.options.get("vault_env")
@@ -1000,6 +1007,10 @@ def _vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
         _assert_safe_path_component(override, "options.vault_env")
         return base.parent / override
     return base
+
+
+# Historical private name, kept so existing call sites/tests stay valid.
+_vault_env_path = vault_env_path
 
 
 def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path) -> str:
