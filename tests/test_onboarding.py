@@ -496,7 +496,11 @@ class TestM2PlaneWritePathCannotEscape:
         decoy.write_text("export PATH=/usr/bin\n", encoding="utf-8")
         before = decoy.read_bytes()
         manifest = write_manifest(
-            tmp_path, extra=f'vault_env = "{decoy}"\n'
+            # TOML *literal* string: a Windows path's backslashes are not
+            # escapes there. With a basic string, "C:\\Users\\..." makes
+            # \\U an invalid unicode escape and the manifest never parses,
+            # so this test failed on Windows before reaching its assertion.
+            tmp_path, extra=f"vault_env = '{decoy}'\n"
         )
         admin = write_admin_env(tmp_path)
         vault = FakeVault()
