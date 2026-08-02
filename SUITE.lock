@@ -29,7 +29,7 @@ repo = "hraedon/regista"
 version = "0.5.5"
 # The git SHA of regista == the umbrella's [components.regista].revision ==
 # the v0.5.5 tag (describe matches the tag exactly; no post-tag commits).
-sha = "cc8a9d3c8d140285dddb0ebdfef3d8cd3e7bb425"
+sha = "375f1a1b4b808d4693493a8e98e7bfbe4bb0d278"
 describe = "v0.5.5"
 # The published lower bound acb actually declares (pyproject.toml suite-secrets
 # extra). The exact version the suite develops against is `version` above.
