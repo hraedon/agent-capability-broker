@@ -41,7 +41,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<9" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0,<7" },
     { name = "pyyaml", marker = "extra == 'hermes'", specifier = ">=6.0,<7" },
-    { name = "regista-hraedon", marker = "extra == 'suite-secrets'", specifier = ">=0.5.1,<0.6" },
+    { name = "regista-hraedon", marker = "extra == 'suite-secrets'", specifier = ">=0.7,<0.8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16,<1" },
 ]
 provides-extras = ["dev", "cred", "suite-secrets", "hermes", "narration"]
@@ -667,7 +667,7 @@ wheels = [
 
 [[package]]
 name = "regista-hraedon"
-version = "0.5.4"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema" },
@@ -679,9 +679,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/68/ef/1df183aa29f1422b160c78255d894f5b91c752c46fb40daa2c5e059a2717/regista_hraedon-0.5.4.tar.gz", hash = "sha256:ce2d721005b6d52059378b755c821289eddcca77cc5d88749b650da7fd2a05a7", size = 947326, upload-time = "2026-07-29T15:33:15.316Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/bb/9e604116c3cc2c805e100ed7a41a8d1ed1ed2be3aa4f5245eea2ece7171d/regista_hraedon-0.7.0.tar.gz", hash = "sha256:3753e32e661d4ea6419d75b5e20795ef25948b22f52805ce4a1e0e8dc61d8da3", size = 2259500, upload-time = "2026-08-22T03:24:30.942Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/2f/13922f6a5729306f937cb0e5286b9f92d8f4134d554abd380e8ac41b5b65/regista_hraedon-0.5.4-py3-none-any.whl", hash = "sha256:b4d3890fc9f20f84ce629abf3bad9664f3940819868643dc83c2a48b0cd7c1a6", size = 290267, upload-time = "2026-07-29T15:33:13.849Z" },
+    { url = "https://files.pythonhosted.org/packages/61/83/0864c0052b2f1d8755267aeb65963aeb6e5db8582b19551ab2937c193ec1/regista_hraedon-0.7.0-py3-none-any.whl", hash = "sha256:0689e44815ebbfc2acfeb7b1135aad426c3d235f60c5aea1a5b246b2949f9352", size = 642734, upload-time = "2026-08-22T03:24:32.488Z" },
 ]
 
 [[package]]
