@@ -667,7 +667,7 @@ wheels = [
 
 [[package]]
 name = "regista-hraedon"
-version = "0.7.1"
+version = "0.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema" },
@@ -679,9 +679,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/96/33/13435932695f05aa1a81621ed1ba5ec9477ca810f9f388c0826c9a019381/regista_hraedon-0.7.1.tar.gz", hash = "sha256:25795e4babc7695ed487a90ab09c0270cc4cb81780bd3e899adc59700c04009b", size = 2276268, upload-time = "2026-08-22T13:32:05.101Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/b4/8a548f3ec8974e6595a2364015c3034703d967cc97103d89b8d6d145ef93/regista_hraedon-0.7.2.tar.gz", hash = "sha256:1c66a838969f7924d445c47be589a6dcfcacfd5d5b319cbfb8f53e89c0263d5c", size = 2346745, upload-time = "2026-08-23T01:13:47.666Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/e8/bb64fa6cb94715b7ffc947663fd42ee1c728e24269641ffa4fdfbe38c610/regista_hraedon-0.7.1-py3-none-any.whl", hash = "sha256:a5ea7f27eedfd4b59cbd20e0d9cf652b871268443b9a990ac62cd664d3d3f227", size = 652690, upload-time = "2026-08-22T13:32:06.984Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/27/50460358ee76a70ce42ee9931f50af998c3ffcf7b6dd345b236cf12752ba/regista_hraedon-0.7.2-py3-none-any.whl", hash = "sha256:5c34cfedcf02c085c2197f4140b70c49a02e2b264432855920d95acd3541df1d", size = 696150, upload-time = "2026-08-23T01:13:49.396Z" },
 ]
 
 [[package]]
