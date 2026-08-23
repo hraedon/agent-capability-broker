@@ -26,11 +26,11 @@ distribution = "regista-hraedon"
 repo = "hraedon/regista"
 # The released PyPI version the suite ships and acb's suite-secrets extra
 # composes with. Must equal agent-suite/SUITE.lock [components.regista].version.
-version = "0.7.1"
+version = "0.7.2"
 # The git SHA of regista == the umbrella's [components.regista].revision ==
-# the v0.7.1 tag (describe matches the tag exactly; no post-tag commits).
-sha = "8dd7b3464b0316f0f3a36e46dee64e36ceac6dbf"
-describe = "v0.7.1"
+# the v0.7.2 tag (describe matches the tag exactly; no post-tag commits).
+sha = "82fb5c82cebbe51cd4e03ff432ed1b5fa8494da0"
+describe = "v0.7.2"
 # The published lower bound acb actually declares (pyproject.toml suite-secrets
 # extra). The exact version the suite develops against is `version` above.
 pyproject_floor = "regista-hraedon>=0.7,<0.8"
