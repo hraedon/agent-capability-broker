@@ -42,7 +42,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0,<7" },
     { name = "pyyaml", marker = "extra == 'hermes'", specifier = ">=6.0,<7" },
     { name = "regista-hraedon", marker = "extra == 'suite-secrets'", specifier = ">=0.7,<0.8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16,<1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16,<0.17" },
 ]
 provides-extras = ["dev", "cred", "suite-secrets", "hermes", "narration"]
 
