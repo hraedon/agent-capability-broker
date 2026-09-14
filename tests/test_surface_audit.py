@@ -44,10 +44,11 @@ Run: `psql "postgres://bot:REDACTED@db.example.invalid/app"`
 
 def _opencode(tmp_path: Path, shims: dict[str, str], mcp: dict[str, object] | None = None):
     root = tmp_path / "oc"
-    (root / "command").mkdir(parents=True)
-    (root / "opencode.json").write_text(json.dumps({"mcp": mcp or {}}), encoding="utf-8")
+    (root / "commands").mkdir(parents=True)
+    cfg = json.dumps({"mcp": {"servers": mcp or {}}})
+    (root / "opencode.json").write_text(cfg, encoding="utf-8")
     for name, body in shims.items():
-        (root / "command" / f"{name}.md").write_text(body, encoding="utf-8")
+        (root / "commands" / f"{name}.md").write_text(body, encoding="utf-8")
     return OpencodeAdapter(config_path=root / "opencode.json")
 
 
@@ -185,8 +186,8 @@ def test_absent_shim_is_not_a_clobber(tmp_path: Path) -> None:
 
 def _doctor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "oc"
-    (root / "command").mkdir(parents=True)
-    (root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+    (root / "commands").mkdir(parents=True)
+    (root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(root / "opencode.json"))
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(tmp_path / "no-hermes.yaml"))
@@ -199,7 +200,7 @@ def _doctor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         'from_env="ACB_T"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
-    (root / "command" / "cred-svc-bot.md").write_text(_GOOD_SHIM, encoding="utf-8")
+    (root / "commands" / "cred-svc-bot.md").write_text(_GOOD_SHIM, encoding="utf-8")
     return manifest
 
 
@@ -222,7 +223,7 @@ def test_doctor_reports_a_rogue_capability_as_a_named_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest = _doctor_env(tmp_path, monkeypatch)
-    (tmp_path / "oc" / "command" / "cred-rogue-admin.md").write_text(
+    (tmp_path / "oc" / "commands" / "cred-rogue-admin.md").write_text(
         "Run: `acb exec cred:rogue-admin -- <command>`\n", encoding="utf-8"
     )
 
@@ -241,7 +242,7 @@ def test_doctor_reports_a_clobbered_capability_as_a_named_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest = _doctor_env(tmp_path, monkeypatch)
-    (tmp_path / "oc" / "command" / "cred-svc-bot.md").write_text(
+    (tmp_path / "oc" / "commands" / "cred-svc-bot.md").write_text(
         _CLOBBERED_SHIM, encoding="utf-8"
     )
 
@@ -259,7 +260,7 @@ def test_doctor_table_names_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     manifest = _doctor_env(tmp_path, monkeypatch)
-    (tmp_path / "oc" / "command" / "cred-rogue-admin.md").write_text("# mine\n", encoding="utf-8")
+    (tmp_path / "oc" / "commands" / "cred-rogue-admin.md").write_text("# mine\n", encoding="utf-8")
     main(["doctor", "-m", str(manifest)])
     out = capsys.readouterr().out
     assert "rogue:opencode:cred-rogue-admin" in out

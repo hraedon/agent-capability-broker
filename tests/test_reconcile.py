@@ -28,10 +28,12 @@ def _config_with_token(tmp_path: Path) -> Path:
     """An opencode.json with a broken Playwright block AND a token-bearing sibling."""
     cfg = {
         "mcp": {
+          "servers": {
             "sibling": {"type": "remote", "url": "https://api.example/mcp",
                     "headers": {"Authorization": SECRET}},
             "playwright": {"type": "local", "enabled": True,
                            "command": ["npx", "-y", "@playwright/mcp@latest", "--headless"]},
+          }
         }
     }
     p = tmp_path / "opencode.json"
@@ -63,9 +65,9 @@ def test_apply_pins_and_preserves_sibling_secret(tmp_path: Path, browsers: None)
 
     after = json.loads(cfg_path.read_text())
     # launcher pinned...
-    assert after["mcp"]["playwright"]["command"][2] == "@playwright/mcp@1.43.0"
+    assert after["mcp"]["servers"]["playwright"]["command"][2] == "@playwright/mcp@1.43.0"
     # ...and the sibling's bearer token survived untouched.
-    assert after["mcp"]["sibling"]["headers"]["Authorization"] == SECRET
+    assert after["mcp"]["servers"]["sibling"]["headers"]["Authorization"] == SECRET
     # backup captured the pre-edit content (still @latest).
     assert "@playwright/mcp@latest" in Path(res.backup_path).read_text()  # type: ignore[arg-type]
 

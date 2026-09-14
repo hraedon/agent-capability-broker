@@ -25,9 +25,9 @@ VAULT_CAP = Capability("cred:svc-bot", "cred", ("opencode",), {"vault": "kv/exam
 
 def _opencode(root: Path, *, shims: list[str] | None = None) -> OpencodeAdapter:
     if shims is not None:
-        (root / "command").mkdir(parents=True, exist_ok=True)
+        (root / "commands").mkdir(parents=True, exist_ok=True)
         for name in shims:
-            (root / "command" / f"{name}.md").write_text("# shim\n", encoding="utf-8")
+            (root / "commands" / f"{name}.md").write_text("# shim\n", encoding="utf-8")
     return OpencodeAdapter(config_path=root / "opencode.json")
 
 
@@ -226,7 +226,7 @@ def test_apply_renders_opencode_shim_idempotently(tmp_path: Path) -> None:
 
     res = CredProvider().apply(plan[0], adapter)
     assert res.status == "applied"
-    shim_file = tmp_path / "command" / "cred-svc-bot.md"
+    shim_file = tmp_path / "commands" / "cred-svc-bot.md"
     assert "acb exec cred:svc-bot" in shim_file.read_text()
     assert adapter.command_shims() == {"cred-svc-bot"}
 
@@ -250,7 +250,8 @@ def test_cli_doctor_reconcile_roundtrip(
 ) -> None:
     oc_root = tmp_path / "oc"
     oc_root.mkdir()
-    (oc_root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")  # adapter.available()
+    # adapter.available() only needs the file to parse.
+    (oc_root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(oc_root / "opencode.json"))
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
@@ -273,7 +274,7 @@ def test_cli_doctor_reconcile_roundtrip(
     with redirect_stdout(io.StringIO()):
         rc = main(["reconcile", "-m", str(manifest), "--apply"])
     assert rc == 0
-    assert (oc_root / "command" / "cred-svc-bot.md").is_file()
+    assert (oc_root / "commands" / "cred-svc-bot.md").is_file()
 
     # After: shim present + env source set -> PRESENT_OK -> clean exit, no secret leaked.
     buf = io.StringIO()

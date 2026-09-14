@@ -135,7 +135,7 @@ def _harness_env(
     root = tmp_path / "oc"
     root.mkdir()
     if opencode_present:
-        (root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+        (root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(root / "opencode.json"))
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(tmp_path / "no-hermes.yaml"))
@@ -154,11 +154,11 @@ def test_doctor_json_healthy_classifies_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _harness_env(tmp_path, monkeypatch, opencode_present=True)
-    (root / "command").mkdir()
+    (root / "commands").mkdir()
     # A realistic shim body: the surface audit (WI-C) verifies that a declared
     # capability's installed shim still brokers `acb exec <id>`, so a stub that
     # brokers nothing is (correctly) reported as clobbered.
-    (root / "command" / "cred-svc-bot.md").write_text(
+    (root / "commands" / "cred-svc-bot.md").write_text(
         "# shim\n\n```\nacb exec cred:svc-bot -- <command>\n```\n", encoding="utf-8"
     )
     monkeypatch.setenv("ACB_T", "set")

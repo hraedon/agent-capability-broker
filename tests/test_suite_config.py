@@ -226,7 +226,7 @@ def test_doctor_json_suite_shape(
     )
     oc_root = tmp_path / "oc"
     oc_root.mkdir()
-    (oc_root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+    (oc_root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(oc_root / "opencode.json"))
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
 
@@ -258,7 +258,7 @@ def test_doctor_json_no_secret_leaked(
     )
     oc_root = tmp_path / "oc"
     oc_root.mkdir()
-    (oc_root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+    (oc_root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     (oc_root / "command").mkdir()
     (oc_root / "command" / "cred-svc-bot.md").write_text("# shim\n", encoding="utf-8")
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(oc_root / "opencode.json"))

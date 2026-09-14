@@ -23,9 +23,9 @@ def _setup_oc(
 ) -> Path:
     oc_root = tmp_path / "oc"
     oc_root.mkdir()
-    (oc_root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+    (oc_root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     if shims:
-        cmd_dir = oc_root / "command"
+        cmd_dir = oc_root / "commands"
         cmd_dir.mkdir()
         for name in shims:
             (cmd_dir / f"{name}.md").write_text("# shim\n", encoding="utf-8")
@@ -58,7 +58,7 @@ def test_install_harness_creates_shims(
 
     out = buf.getvalue()
     assert rc == 0
-    assert (tmp_path / "oc" / "command" / "cred-svc-bot.md").is_file()
+    assert (tmp_path / "oc" / "commands" / "cred-svc-bot.md").is_file()
     assert "present_ok" in out.lower()
 
 
@@ -76,7 +76,7 @@ def test_install_harness_dry_run_writes_nothing(
     out = buf.getvalue()
     assert rc == 2
     assert "would apply" in out.lower()
-    assert not (tmp_path / "oc" / "command" / "cred-svc-bot.md").exists()
+    assert not (tmp_path / "oc" / "commands" / "cred-svc-bot.md").exists()
 
 
 def test_install_harness_rerun_is_noop(
@@ -381,7 +381,7 @@ def test_install_harness_only_provisions_named_harness(
 ) -> None:
     oc_root = tmp_path / "oc"
     oc_root.mkdir()
-    (oc_root / "opencode.json").write_text('{"mcp": {}}', encoding="utf-8")
+    (oc_root / "opencode.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
     claude_root = tmp_path / "claude"
     claude_root.mkdir()
     (claude_root / "settings.json").write_text('{}', encoding="utf-8")
@@ -402,7 +402,7 @@ def test_install_harness_only_provisions_named_harness(
         rc = main(["install-harness", "opencode", "-m", str(manifest)])
     assert rc == 0
 
-    assert (oc_root / "command" / "cred-svc-bot.md").is_file()
+    assert (oc_root / "commands" / "cred-svc-bot.md").is_file()
     assert not (claude_root / "skills").exists()
 
 
@@ -526,8 +526,8 @@ def test_install_harness_multiple_capabilities(
 
     out = buf.getvalue()
     assert rc == 0
-    assert (tmp_path / "oc" / "command" / "cred-cred-a.md").is_file()
-    assert (tmp_path / "oc" / "command" / "cred-cred-b.md").is_file()
+    assert (tmp_path / "oc" / "commands" / "cred-cred-a.md").is_file()
+    assert (tmp_path / "oc" / "commands" / "cred-cred-b.md").is_file()
     assert "cred:cred-a" in out
     assert "cred:cred-b" in out
 

@@ -19,9 +19,9 @@ from agent_capability_broker.cli import _shim_gap, main
 
 
 def _opencode_tree(root: Path, commands: list[str]) -> OpencodeAdapter:
-    (root / "command").mkdir(parents=True)
+    (root / "commands").mkdir(parents=True)
     for name in commands:
-        (root / "command" / f"{name}.md").write_text("# shim\n", encoding="utf-8")
+        (root / "commands" / f"{name}.md").write_text("# shim\n", encoding="utf-8")
     return OpencodeAdapter(config_path=root / "opencode.json")
 
 
@@ -39,7 +39,7 @@ def _claude_tree(root: Path, skills: list[str], *, bare: list[str] | None = None
 def test_opencode_shims_are_md_stems(tmp_path: Path) -> None:
     adapter = _opencode_tree(tmp_path, ["start", "end", "cert-watch-e2e"])
     # A stray non-md file is ignored.
-    (tmp_path / "command" / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "commands" / "notes.txt").write_text("x", encoding="utf-8")
     assert adapter.command_shims() == {"start", "end", "cert-watch-e2e"}
 
 

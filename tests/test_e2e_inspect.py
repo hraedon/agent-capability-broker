@@ -29,7 +29,7 @@ def installed_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _opencode(tmp_path: Path, mcp: dict[str, object]) -> OpencodeAdapter:
     p = tmp_path / "opencode.json"
-    p.write_text(json.dumps({"mcp": mcp}), encoding="utf-8")
+    p.write_text(json.dumps({"mcp": {"servers": mcp}}), encoding="utf-8")
     return OpencodeAdapter(config_path=p)
 
 
