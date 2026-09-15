@@ -23,6 +23,13 @@ Two complementary checks:
    a leak is irreversible. That asymmetry was documented in publication.toml for
    months before it was implemented here.
 
+   In ``--staged`` mode (the pre-commit hook) the scan reads the **staged index
+   blobs** (``git show :0:<path>``), never the working tree: the commit records
+   the index, and worktree bytes can legitimately differ from it (``git add
+   -p``, staging then editing). Scanning the worktree let a staged forbidden
+   identifier hide behind a clean unstaged copy — and blocked clean commits
+   whose worktree copy was dirty (WI-031).
+
    **Multi-word identifiers are double-quoted** (``"two words"``) and match any
    separator run — spaced, hyphenated, underscored, dotted, or wrapped across a
    line break. Before this, the parser split unconditionally on whitespace, so a
@@ -228,6 +235,12 @@ def scan_files(
     unreadable file lets one containing a forbidden identifier pass, which is
     precisely the fails-open case this gate exists to prevent.
 
+    **Fail-closed default**: when the caller omits *unreadable*, the function
+    owns an internal collector and raises :class:`GateError` after scanning if
+    any path was unreadable. Callers that supply their own list (the CLI, for
+    detailed reporting) retain full control and receive the paths without an
+    exception.
+
     The out-parameter is deliberate. This script is COPIED into every repo in the
     estate and several of them test ``scan_files`` directly, so returning a tuple
     instead of a list broke seven repositories' test suites at once. An optional
@@ -235,6 +248,7 @@ def scan_files(
     the CLI fail closed on an unreadable file.
     """
     violations: list[Violation] = []
+    owns_collector = unreadable is None
     if unreadable is None:
         unreadable = []
     for path in paths:
@@ -244,7 +258,11 @@ def scan_files(
         # looks like an unreadable file. The target itself can carry a forbidden
         # identifier, so it is scanned rather than skipped.
         if path.is_symlink():
-            target = os.readlink(path)
+            try:
+                target = os.readlink(path)
+            except OSError:
+                unreadable.append(path)
+                continue
             for violation in scan_text(target, identifiers):
                 violations.append(replace(violation, path=path, line=target))
             continue
@@ -264,6 +282,12 @@ def scan_files(
             continue
         for violation in scan_text(text, identifiers):
             violations.append(replace(violation, path=path))
+    if owns_collector and unreadable:
+        names = ", ".join(str(p) for p in unreadable[:5])
+        raise GateError(
+            f"{len(unreadable)} tracked file(s) could not be read ({names}); "
+            "the gate cannot clear a tree it could not fully scan"
+        )
     return violations
 
 
@@ -297,6 +321,36 @@ def _run_git(args: list[str]) -> str:
     except OSError as exc:
         raise GateError(f"could not run git ({' '.join(args)}): {exc}") from exc
     return result.stdout
+
+
+def _run_git_bytes(args: list[str]) -> bytes:
+    """Run a git command and return raw stdout bytes.
+
+    The bytes twin of _run_git, for blob content: ``text=True`` would translate
+    newlines and force a decode before the binary/BOM sniff can run, so blob
+    reads must stay binary. Same GateError contract — a failure is a clean
+    refusal, never a traceback.
+    """
+    try:
+        result = subprocess.run(args, capture_output=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+        raise GateError(
+            f"git command failed ({' '.join(args)}): exit {exc.returncode}: {stderr.strip()}"
+        ) from exc
+    except OSError as exc:
+        raise GateError(f"could not run git ({' '.join(args)}): {exc}") from exc
+    return result.stdout
+
+
+def _read_staged_blob(path: Path) -> bytes:
+    """Content of the stage-0 index blob for *path* — the bytes a commit records.
+
+    ``:0:<path>`` names the index entry explicitly (the bare ``:<path>`` form is
+    ambiguous with rev-syntax magic like ``:/text``). For a staged symlink the
+    blob is the link's target string, matching the scan_files symlink semantics.
+    """
+    return _run_git_bytes(["git", "show", f":0:{path.as_posix()}"])
 
 
 def _paths_from_git(args: list[str]) -> list[Path]:
@@ -359,6 +413,57 @@ def collect_staged_paths() -> list[Path]:
             "--diff-filter=ACM", "--no-renames", "-z",
         ]
     )
+
+
+def scan_staged_blobs(
+    identifiers: frozenset[str],
+    paths: list[Path],
+    *,
+    unreadable: list[Path] | None = None,
+) -> list[Violation]:
+    """Scan the staged (stage-0) index blobs at *paths* for forbidden identifiers.
+
+    The pre-commit twin of scan_files, reading ``git show :0:<path>`` instead of
+    the working tree. The distinction is the point (WI-031): a commit records
+    the INDEX, and worktree bytes legitimately diverge from it (``git add -p``
+    partial stages, staging then editing). Scanning worktree bytes let a staged
+    forbidden identifier be hidden by overwriting the file with clean unstaged
+    content — the hook cleared bytes no commit was going to record and let the
+    forbidden blob into history. The inverse also held: a clean index under a
+    dirty or deleted worktree copy was blocked for content that was never being
+    committed.
+
+    Binary and BOM handling match scan_files. A staged symlink needs no special
+    case: its index blob IS the target string, which is exactly what scan_files
+    scans via os.readlink.
+
+    Same fail-closed contract as scan_files: a staged path whose blob cannot be
+    read is collected into *unreadable* when a list is supplied; otherwise the
+    function owns the collector and raises :class:`GateError` after scanning.
+    """
+    violations: list[Violation] = []
+    owns_collector = unreadable is None
+    if unreadable is None:
+        unreadable = []
+    for path in paths:
+        try:
+            blob = _read_staged_blob(path)
+        except GateError:
+            unreadable.append(path)
+            continue
+        chunk = blob[:_BINARY_SNIFF_LEN]
+        if _is_binary(chunk):
+            continue
+        text = blob.decode(_sniff_encoding(chunk) or "utf-8", errors="replace")
+        for violation in scan_text(text, identifiers):
+            violations.append(replace(violation, path=path))
+    if owns_collector and unreadable:
+        names = ", ".join(str(p) for p in unreadable[:5])
+        raise GateError(
+            f"{len(unreadable)} staged blob(s) could not be read ({names}); "
+            "the gate cannot clear an index it could not fully scan"
+        )
+    return violations
 
 
 def print_report(violations: list[Violation]) -> None:
@@ -545,12 +650,16 @@ def _run(args: argparse.Namespace) -> int:
 
     scan_paths = [p for p in paths if not any(part in _SKIP_DIRS for part in p.parts)]
     unreadable: list[Path] = []
-    violations = scan_files(identifiers, scan_paths, unreadable=unreadable)
+    # --staged judges the index blobs (what the commit records), never the
+    # worktree; the CI default scans the checked-out tracked tree (WI-031).
+    scan = scan_staged_blobs if args.staged else scan_files
+    violations = scan(identifiers, scan_paths, unreadable=unreadable)
     if violations:
         print_report(violations)
         return 1
     if unreadable:
-        print("Tracked files could not be read; the gate cannot clear them:", file=sys.stderr)
+        what = "Staged blobs" if args.staged else "Tracked files"
+        print(f"{what} could not be read; the gate cannot clear them:", file=sys.stderr)
         for p in sorted(unreadable, key=str):
             print(f"  {p}", file=sys.stderr)
         print(

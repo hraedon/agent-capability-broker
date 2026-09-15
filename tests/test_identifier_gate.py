@@ -93,6 +93,14 @@ def _commit(root: Path, message: str) -> str:
     ).stdout.strip()
 
 
+def _staged_blob(root: Path, relpath: str) -> str:
+    """The stage-0 index content for *relpath* -- the bytes a commit would record."""
+    return subprocess.run(
+        ["git", "show", f":0:{relpath}"], cwd=root, check=True,
+        capture_output=True, text=True,
+    ).stdout
+
+
 def _declare(root: Path, visibility: str) -> None:
     (root / "publication.toml").write_text(
         f'[publication]\nremote_owner = "someone"\nvisibility = "{visibility}"\n',
@@ -615,6 +623,73 @@ def test_staged_mode_catches_a_rename_into_a_guarded_directory(
     subprocess.run(["git", "add", "-f", "--", dest], cwd=repo, check=True)
     monkeypatch.delenv("ACB_FORBIDDEN_IDENTIFIERS", raising=False)
     assert gate.main(["--staged"]) == 1
+
+
+def test_staged_mode_judges_the_index_not_the_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bypass this scanner exists to close.
+
+    A commit records the INDEX. Staging a forbidden identifier and then
+    overwriting the working copy with clean bytes leaves an index blob that
+    still carries it -- and a gate that reads the worktree sees only the clean
+    bytes, passes, and lets the forbidden blob into history. The worktree
+    content here is deliberately innocent: if this test ever passes by reading
+    the file, it is reading the wrong thing.
+    """
+    _track(repo, "notes.md", "the widgetcorp estate\n")
+    (repo / "notes.md").write_text("perfectly innocent text\n", encoding="utf-8")
+    monkeypatch.setenv("ACB_FORBIDDEN_IDENTIFIERS", "widgetcorp")
+
+    assert (repo / "notes.md").read_text() == "perfectly innocent text\n"
+    assert "widgetcorp" in _staged_blob(repo, "notes.md")
+    assert gate.main(["--staged"]) == 1
+
+
+def test_staged_mode_ignores_unstaged_worktree_content(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse, which matters just as much.
+
+    A clean index under a dirty worktree was blocked for content no commit was
+    going to record. A gate that cries wolf on work in progress trains people to
+    reach for --no-verify, which disables it entirely.
+    """
+    _track(repo, "notes.md", "perfectly innocent text\n")
+    (repo / "notes.md").write_text("the widgetcorp estate\n", encoding="utf-8")
+    monkeypatch.setenv("ACB_FORBIDDEN_IDENTIFIERS", "widgetcorp")
+
+    assert gate.main(["--staged"]) == 0
+
+    # The two modes read different things, and that is the whole point. The
+    # default scan reads the CHECKED-OUT bytes, so it still sees the dirty
+    # worktree and refuses. In CI the distinction is invisible because the
+    # checkout is pristine and index, worktree and HEAD all agree -- which is
+    # exactly why this divergence has to be pinned by a test rather than noticed.
+    _commit(repo, "commit the clean index")
+    assert gate.main([]) == 1
+
+
+def test_staged_binary_blob_is_skipped(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binary handling must match scan_files, or the two modes disagree."""
+    _track(repo, "blob.bin", b"\x00\x01\x02widgetcorp")
+    monkeypatch.setenv("ACB_FORBIDDEN_IDENTIFIERS", "widgetcorp")
+    assert gate.main(["--staged"]) == 0
+
+
+def test_staged_utf16_blob_is_decoded(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(repo, "export.txt", b"\xff\xfe" + "widgetcorp\n".encode("utf-16-le"))
+    monkeypatch.setenv("ACB_FORBIDDEN_IDENTIFIERS", "widgetcorp")
+    assert gate.main(["--staged"]) == 1
+
+
+def test_scan_staged_blobs_returns_a_list(repo: Path) -> None:
+    """Same fleet-wide return-type contract as scan_files."""
+    assert isinstance(gate.scan_staged_blobs(frozenset({"widgetcorp"}), []), list)
 
 
 # --------------------------------------------------------------------------
