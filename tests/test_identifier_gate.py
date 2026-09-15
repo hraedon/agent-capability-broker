@@ -300,6 +300,32 @@ def test_bom_marked_text_is_decoded_not_dismissed_as_binary(
     assert len(gate.scan_files(frozenset({"widgetcorp"}), [target])) == 1
 
 
+def test_utf16_bom_does_not_leak_into_the_reported_line(tmp_path: Path) -> None:
+    """An explicit-endian UTF-16 decode leaves U+FEFF at the start of line 1.
+
+    It hides nothing -- matching is substring-based, so the identifier is found
+    either way -- but a report that prints an invisible character before the
+    offending text is one people mistrust, and the two scan modes must agree.
+    """
+    target = tmp_path / "export.txt"
+    target.write_bytes(b"\xff\xfe" + "widgetcorp is here\n".encode("utf-16-le"))
+    (violation,) = gate.scan_files(frozenset({"widgetcorp"}), [target])
+    assert violation.line == "widgetcorp is here"
+    assert not violation.line.startswith("\ufeff")
+
+
+def test_staged_utf16_bom_is_stripped_too(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The staged path must strip it as well, or the modes disagree."""
+    _track(repo, "export.txt", b"\xff\xfe" + "widgetcorp is here\n".encode("utf-16-le"))
+    monkeypatch.setenv("ACB_FORBIDDEN_IDENTIFIERS", "widgetcorp")
+    violations = gate.scan_staged_blobs(
+        frozenset({"widgetcorp"}), [Path("export.txt")]
+    )
+    assert violations and violations[0].line == "widgetcorp is here"
+
+
 def test_genuine_binary_is_skipped(tmp_path: Path) -> None:
     target = tmp_path / "blob.bin"
     target.write_bytes(b"\x00\x01\x02widgetcorp")
@@ -369,6 +395,44 @@ def test_nested_samples_directory_is_not_a_false_positive() -> None:
     """``tests/samples/`` is a legitimate code directory, not the data dir."""
     nested = [Path("tests/samples/fixture.json")]
     assert gate.leaked_tracked_files(nested, frozenset({"samples"})) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["notes.swp", "notes.swo", ".notes.md.swp", ".notes.md.swn"]
+)
+def test_editor_swap_files_are_never_tracked(name: str) -> None:
+    """A swap file holds the BUFFER of the file being edited.
+
+    A secret typed and not yet saved lives in there, so it is guarded regardless
+    of denylist configuration. Vim's collision sequence (.swo, .swn, ... once
+    .swp is taken) is why suffix matching alone is not enough.
+    """
+    assert gate.leaked_tracked_files([Path(name)], frozenset()) == [Path(name)]
+
+
+def test_a_swap_file_deep_in_the_tree_is_still_caught() -> None:
+    p = Path("src/deep/.thing.py.swp")
+    assert gate.leaked_tracked_files([p], frozenset()) == [p]
+
+
+@pytest.mark.parametrize("name", [".env", ".env.local", ".env.production"])
+def test_root_level_env_files_are_never_tracked(name: str) -> None:
+    assert gate.leaked_tracked_files([Path(name)], frozenset()) == [Path(name)]
+
+
+def test_env_example_is_the_deliberately_tracked_template() -> None:
+    assert gate.leaked_tracked_files([Path(".env.example")], frozenset()) == []
+
+
+def test_a_nested_env_file_is_not_guarded() -> None:
+    """Scoped to the ROOT, so a fixture like tests/fixtures/.env.broken stays possible."""
+    assert gate.leaked_tracked_files([Path("tests/fixtures/.env.broken")], frozenset()) == []
+
+
+def test_ordinary_dotfiles_are_not_guarded() -> None:
+    """The rules must not swallow normal repo furniture."""
+    ordinary = [Path(".gitignore"), Path(".editorconfig"), Path("env.py"), Path("a.swap")]
+    assert gate.leaked_tracked_files(ordinary, frozenset()) == []
 
 
 def test_guard_fires_through_the_cli_on_a_force_added_sample(repo: Path) -> None:
