@@ -1,5 +1,12 @@
 # agent-capability-broker
 
+> **Frozen 2026-10-04 — maintenance only.** This project still works and stays
+> in use where it is already wired in, but it gets security and break-fix
+> changes only: no new features and no new plans. Active development on
+> delegated agent work has moved to a successor control plane that doesn't
+> depend on this suite. The core library, regista, ships one final reduced
+> 0.8.0 release and then parks too.
+
 **Keep agents at parity across harnesses.** A capability that exists on a
 machine — an AD service-account credential, a Playwright browser, a web-search
 backend — should be *uniformly discoverable and invocable* by an agent
