@@ -1047,7 +1047,11 @@ def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path)
             "the shim contains only the capability id and no secret reference."
         )
     else:
-        unix_command = f"ACB_VAULT_ENV={ve} acb exec {cap.id} -- <command> [args...]"
+        # The plane path is quoted in every block: a Windows path carries
+        # spaces and backslashes, and an unquoted `VAR=C:\...` breaks the
+        # POSIX assignment too. Bash preserves backslashes inside double
+        # quotes (they are only special before $ ` " \ and newline).
+        unix_command = f'ACB_VAULT_ENV="{ve}" acb exec {cap.id} -- <command> [args...]'
         powershell_command = (
             f'$env:ACB_VAULT_ENV="{ve}"; acb exec {cap.id} -- <command> [args...]'
         )

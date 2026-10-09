@@ -384,12 +384,14 @@ def test_install_harness_zcode_dry_run_writes_nothing(
     assert not (tmp_path / "zcode-home" / "skills").exists()
 
 
-def test_install_harness_all_does_not_expand_to_zcode(
+def test_install_harness_all_expands_to_zcode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`all` stays the stable public set (claude, opencode) — zcode joins
-    atomically only after its live interop proof, mirroring the Codex rule."""
-    home = _zcode_home(tmp_path, monkeypatch)
+    """`all` includes zcode since its live interop proof (2026-10-09: a fresh
+    ZCode session's skill discovery surfaced every rendered shim, descriptions
+    matching the on-disk SKILL.md exactly). Codex stays out until its own
+    proof, per Decision 2."""
+    _zcode_home(tmp_path, monkeypatch)
     monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
@@ -404,6 +406,28 @@ def test_install_harness_all_does_not_expand_to_zcode(
     payload = json.loads(buf.getvalue())
     assert rc == 2  # dry-run exit contract
     expanded = [record["harness"] for record in payload["results"]]
-    assert expanded == ["claude", "opencode"]
-    # And nothing landed in the zcode tree.
-    assert not (home / "skills").exists()
+    assert expanded == ["claude", "opencode", "zcode"]
+
+
+def test_cred_shim_quotes_plane_path_in_every_shell_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Windows plane path (spaces, backslashes) must survive every invocation
+    block — the POSIX assignment too, not just PowerShell/cmd."""
+    from agent_capability_broker.model import Capability
+    from agent_capability_broker.providers import _render_cred_shim
+
+    _zcode_home(tmp_path, monkeypatch)
+    cap = Capability(
+        id="cred:svc-bot", provider="cred", harnesses=("zcode",),
+        options={"source": "env", "from_env": "ACB_TEST_SECRET"},
+    )
+    plane = Path("C:/Users/some user/.zcode/cli/vault.env")  # space-bearing path
+    content = _render_cred_shim(cap, "zcode", "cred-svc-bot", plane)
+    # Compare against the same str(Path) the renderer embedded, so the
+    # assertion is separator-agnostic across platforms — what is pinned is the
+    # QUOTING (a space-bearing path unquoted breaks the POSIX assignment).
+    quoted = f'ACB_VAULT_ENV="{plane}"'
+    assert quoted in content  # POSIX block
+    assert '$env:ACB_VAULT_ENV=' in content  # PowerShell block already quoted
+    assert 'set "ACB_VAULT_ENV=' in content  # cmd block already quoted

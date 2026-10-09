@@ -69,9 +69,9 @@ and reconciles reality to it.
   `codex` is recognized by the closed suite contract but currently returns
   explicit, non-zero `unsupported` from `install-harness` until Plan 007 lands.
   Hermes remains an explicit component-private target. Direct
-  `install-harness all` expands only the currently supported public set
-  (Claude + OpenCode); Codex and ZCode are promoted atomically after their
-  live interop proofs land.
+  `install-harness all` expands the currently supported public set
+  (Claude + OpenCode + ZCode, which joined 2026-10-09 after its live interop
+  proof); Codex is promoted atomically after its own proof lands.
 - `doctor` (read-only parity report), `reconcile` (generate wiring, dry-run by
   default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
   (bootstrap: provision one harness from the manifest + verify), `shims`

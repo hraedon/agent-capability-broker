@@ -75,6 +75,7 @@ def _point_env(monkeypatch: pytest.MonkeyPatch, claude_root: Path, oc_root: Path
     # Likewise isolate Codex: an unpopulated CODEX_HOME keeps the host's real
     # ~/.codex out of the parity report (hermetic on any dev box).
     monkeypatch.setenv("ACB_CODEX_HOME", str(oc_root / "codex-home"))
+    monkeypatch.setenv("ACB_ZCODE_CONFIG", str(oc_root / "codex-home"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
