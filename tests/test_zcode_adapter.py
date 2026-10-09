@@ -422,11 +422,12 @@ def test_cred_shim_quotes_plane_path_in_every_shell_block(
         id="cred:svc-bot", provider="cred", harnesses=("zcode",),
         options={"source": "env", "from_env": "ACB_TEST_SECRET"},
     )
-    content = _render_cred_shim(
-        cap, "zcode", "cred-svc-bot",
-        Path("C:/Users/some user/.zcode/cli/vault.env"),
-    )
-    quoted = 'ACB_VAULT_ENV="C:\\Users\\some user\\.zcode\\cli\\vault.env"'
+    plane = Path("C:/Users/some user/.zcode/cli/vault.env")  # space-bearing path
+    content = _render_cred_shim(cap, "zcode", "cred-svc-bot", plane)
+    # Compare against the same str(Path) the renderer embedded, so the
+    # assertion is separator-agnostic across platforms — what is pinned is the
+    # QUOTING (a space-bearing path unquoted breaks the POSIX assignment).
+    quoted = f'ACB_VAULT_ENV="{plane}"'
     assert quoted in content  # POSIX block
     assert '$env:ACB_VAULT_ENV=' in content  # PowerShell block already quoted
     assert 'set "ACB_VAULT_ENV=' in content  # cmd block already quoted
