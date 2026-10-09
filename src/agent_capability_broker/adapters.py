@@ -37,17 +37,30 @@ def _backup(path: Path) -> Path:
     return dest
 
 
-def _add_server(path: Path, container_key: str, name: str, entry: dict[str, object]) -> WriteResult:
+def _add_server(
+    path: Path, container_key: str | tuple[str, ...], name: str, entry: dict[str, object]
+) -> WriteResult:
     """Add a new MCP server under `container_key`, creating file/container as
-    needed. Backs up an existing file first; refuses to clobber an existing
-    server of the same name (callers check existence for idempotence)."""
+    needed. `container_key` is a single key or a nested path (ZCode's
+    `mcp.servers`). Backs up an existing file first; refuses to clobber an
+    existing server of the same name (callers check existence for idempotence)."""
+    keys = (container_key,) if isinstance(container_key, str) else container_key
     data = _load_json(path)
-    container = data.get(container_key)
+    parent: dict[str, object] = data
+    for key in keys[:-1]:
+        nxt = parent.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            parent[key] = nxt
+        parent = nxt
+    leaf = keys[-1]
+    display = ".".join(keys)
+    container = parent.get(leaf)
     if not isinstance(container, dict):
         container = {}
-        data[container_key] = container
+        parent[leaf] = container
     if name in container:
-        raise KeyError(f"server {name!r} already present in {container_key} of {path}")
+        raise KeyError(f"server {name!r} already present in {display} of {path}")
 
     backup = _backup(path) if path.exists() else None
     container[name] = entry
@@ -105,9 +118,12 @@ def _normalize(name: str, entry: dict[str, object]) -> McpServer:
     else:
         kind = "unknown"
 
-    # opencode uses explicit `enabled`; claude has no such key (absent => on),
-    # but honor a `disabled` flag if present.
-    enabled = bool(entry.get("enabled", not entry.get("disabled", False)))
+    # opencode uses explicit `enabled`; claude has no such key (absent => on).
+    # ZCode uses `enabled` and a legacy `enable` spelling; honor both, and a
+    # `disabled` flag if present.
+    enabled = bool(
+        entry.get("enabled", entry.get("enable", not entry.get("disabled", False)))
+    )
 
     return McpServer(name=name, kind=kind, command=command, url=url, enabled=enabled)
 
@@ -406,6 +422,98 @@ class CodexAdapter:
     def write_skill_shim(self, name: str, content: str) -> WriteResult:
         """Render a skill shim at ``skills/<name>/SKILL.md``.  Create-only (refuses
         to overwrite a hand-edited shim); callers guard on ``command_shims()``."""
+        return _create_file(self.shims_path / name / "SKILL.md", content)
+
+
+class ZcodeAdapter:
+    """ZCode: ``~/.zcode/cli/config.json`` -> nested ``mcp.servers``; skills at
+    ``~/.zcode/skills/<name>/SKILL.md``.
+
+    ZCode reads MCP servers from a *nested* ``mcp.servers`` object — not the
+    top-level ``mcpServers`` Claude uses — with per-server entries in the
+    command-string + ``args`` shape (``command`` is a string; an argv-list there
+    is a known-bad hand edit the client rejects). Skills are the same
+    ``SKILL.md`` dir format as Claude Code (``name:`` + ``description:``
+    frontmatter), discovered under the config *root's* ``skills/`` — a sibling
+    of the ``cli/`` dir, not of the config file. Dot-directories are skipped,
+    mirroring Codex's reserved-tree rule.
+
+    ``ACB_ZCODE_CONFIG`` points at the config file for tests/isolation; the
+    config root is then its parent's parent.
+    """
+
+    name = "zcode"
+
+    def __init__(self, config_path: Path | None = None) -> None:
+        env = os.environ.get("ACB_ZCODE_CONFIG")
+        self.config_path = (
+            config_path
+            or (Path(env) if env else Path.home() / ".zcode" / "cli" / "config.json")
+        )
+
+    @property
+    def zcode_home(self) -> Path:
+        """The harness config root: ``~/.zcode`` (config.json lives in ``cli/``)."""
+        return self.config_path.parent.parent
+
+    @property
+    def shims_path(self) -> Path:
+        """Where ZCode keeps skill shims: ``skills/`` under the config root."""
+        return self.zcode_home / "skills"
+
+    @property
+    def vault_env_path(self) -> Path:
+        """Where this harness's Vault AppRole ``.env`` lives: beside the config.
+
+        Matches the sibling adapters: ``vault.env``, not ``.env`` (the latter is
+        auto-sourced by direnv/dotenv, which would risk surfacing the AppRole
+        secret into other tools — violates "Inject, don't surface").
+        """
+        return self.config_path.parent / "vault.env"
+
+    def available(self) -> bool:
+        """ZCode is provisionable iff it has been initialised on this host —
+        its config root exists. The client creates ``~/.zcode`` on first run
+        (config.json itself may only appear once it has settings to persist),
+        so the directory is the honest signal."""
+        return self.zcode_home.is_dir()
+
+    def mcp_servers(self) -> dict[str, McpServer]:
+        mcp = _load_json(self.config_path).get("mcp")
+        if not isinstance(mcp, dict):
+            return {}
+        return _servers_from(mcp.get("servers"))
+
+    def command_shims(self) -> set[str]:
+        """Skill names ZCode advertises: ``skills/<name>/SKILL.md`` dirs.
+
+        Same shape as Claude Code. Dot-directories are excluded. Read-only —
+        only names are enumerated, never the shim bodies. A missing
+        ``skills/`` dir yields an empty set rather than an error.
+        """
+        skills = self.shims_path
+        if not skills.is_dir():
+            return set()
+        return {
+            d.name
+            for d in skills.iterdir()
+            if not d.name.startswith(".") and (d / "SKILL.md").is_file()
+        }
+
+    def add_mcp_server(self, name: str, command: list[str]) -> WriteResult:
+        """Add a stdio MCP server to ZCode's nested ``mcp.servers``
+        (type/command/args shape; ``command`` is a string, per ZCode's schema)."""
+        entry: dict[str, object] = {
+            "type": "stdio",
+            "command": command[0],
+            "args": list(command[1:]),
+        }
+        return _add_server(self.config_path, ("mcp", "servers"), name, entry)
+
+    def write_skill_shim(self, name: str, content: str) -> WriteResult:
+        """Render a skill shim at ``skills/<name>/SKILL.md``. Create-only
+        (refuses to overwrite a hand-edited shim); callers guard on
+        ``command_shims()``."""
         return _create_file(self.shims_path / name / "SKILL.md", content)
 
 

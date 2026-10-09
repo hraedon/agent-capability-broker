@@ -152,11 +152,24 @@ the config root. Codex MCP writes (e2e provider) remain an honest `unsupported`
 skip. Hermes remains a component-private explicit target and is not part of the
 suite's stable `all` expansion.
 
+`zcode` (the ZCode client) is a public explicit target via the `ZcodeAdapter`:
+MCP servers live under a **nested** `mcp.servers` key in
+`~/.zcode/cli/config.json` (per-server `command` is a *string* + `args` — an
+argv list there is a known-bad hand edit), skills are Claude-shaped
+`~/.zcode/skills/<name>/SKILL.md` under the config *root* (not beside the
+config file; dot-dirs never enumerated), and both write paths are supported —
+cred discovery skills and e2e `add_mcp` into `mcp.servers` (backup-first,
+clobber-refusing). `ACB_ZCODE_CONFIG` selects the config file; the config root
+is its parent's parent. It stays out of the stable `all` expansion until its
+live interop proof (a real shim discovered by a ZCode session), mirroring the
+Codex rule.
+
 Beyond the MCP capability layer, each adapter also reads its **command/skill shim
-surface** (`command_shims()`): opencode `command/<name>.md` stems and Claude/Codex
-`skills/<name>/SKILL.md` dirs (Codex's reserved `.system` tree is never
-enumerated or written). `acb shims` reports that surface's parity across
-harnesses (read-only, exits non-zero on a gap) — see `plans/003-shim-surface.md`.
+surface** (`command_shims()`): opencode `command/<name>.md` stems and
+Claude/Codex/ZCode `skills/<name>/SKILL.md` dirs (Codex's reserved `.system`
+tree is never enumerated or written). `acb shims` reports that surface's parity
+across harnesses (read-only, exits non-zero on a gap) — see
+`plans/003-shim-surface.md`.
 
 ## Boundary with sibling tools
 

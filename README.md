@@ -1,11 +1,10 @@
 # agent-capability-broker
 
-> **Frozen 2026-10-04 — maintenance only.** This project still works and stays
-> in use where it is already wired in, but it gets security and break-fix
-> changes only: no new features and no new plans. Active development on
-> delegated agent work has moved to a successor control plane that doesn't
-> depend on this suite. The core library, regista, ships one final reduced
-> 0.8.0 release and then parks too.
+> **Reactivated 2026-10-08** (owner decision; was frozen 2026-10-04). First
+> feature since the freeze: the ZCode harness adapter (`zcode`) — cred
+> discovery shims and e2e MCP wiring, mirroring the Codex adapter's posture.
+> Security and break-fix work continues as before; new capability work is
+> accepted again on owner request.
 
 **Keep agents at parity across harnesses.** A capability that exists on a
 machine — an AD service-account credential, a Playwright browser, a web-search
@@ -65,12 +64,14 @@ and reconciles reality to it.
   `e2e` (Playwright/browser provisioning, local or remote backend) are the first
   two. Adding a provider is the extension point.
 - **Harness adapters** that read and render each harness's wiring (Claude Code
-  `settings.json` + skills; opencode `opencode.json` MCP/commands). `codex` is
-  recognized by the closed suite contract but currently returns explicit,
-  non-zero `unsupported` from `install-harness` until Plan 007 lands. Hermes
-  remains an explicit component-private target. Direct `install-harness all`
-  expands only the currently supported public set (Claude + OpenCode); Codex is
-  promoted atomically after its adapter and conformance proof land.
+  `settings.json` + skills; opencode `opencode.json` MCP/commands; ZCode's
+  nested `~/.zcode/cli/config.json` → `mcp.servers` + `~/.zcode/skills/`).
+  `codex` is recognized by the closed suite contract but currently returns
+  explicit, non-zero `unsupported` from `install-harness` until Plan 007 lands.
+  Hermes remains an explicit component-private target. Direct
+  `install-harness all` expands only the currently supported public set
+  (Claude + OpenCode); Codex and ZCode are promoted atomically after their
+  live interop proofs land.
 - `doctor` (read-only parity report), `reconcile` (generate wiring, dry-run by
   default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
   (bootstrap: provision one harness from the manifest + verify), `shims`
