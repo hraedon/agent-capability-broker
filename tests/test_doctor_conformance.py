@@ -139,6 +139,7 @@ def _harness_env(
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(root / "opencode.json"))
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(tmp_path / "no-hermes.yaml"))
+    monkeypatch.setenv("ACB_ZCODE_CONFIG", str(tmp_path / "no-zcode.json"))
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
     return root
 

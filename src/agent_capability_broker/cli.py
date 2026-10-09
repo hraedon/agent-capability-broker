@@ -33,7 +33,9 @@ from .model import (
 from .providers import PROVIDERS, E2eUnavailable, adapters, exec_composed
 from .surface import ShimSurface, SurfaceFinding, audit_surface
 
-_STABLE_INSTALL_HARNESSES = ("claude", "opencode")
+# zcode joined the stable set 2026-10-09 after its live interop proof
+# (fresh-session skill discovery of all rendered shims, character-exact).
+_STABLE_INSTALL_HARNESSES = ("claude", "opencode", "zcode")
 _CAPABILITY_ID = re.compile(r"^(?:cred|e2e):\S+$")
 
 
@@ -1233,7 +1235,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reg.add_argument(
         "--harnesses", nargs="+", default=list(_STABLE_INSTALL_HARNESSES),
-        help="harnesses to expose (default: claude opencode)",
+        help="harnesses to expose (default: claude opencode zcode)",
     )
     reg.add_argument(
         "--apply", action="store_true",

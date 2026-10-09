@@ -144,6 +144,7 @@ def isolated_environment(
     )
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(home / ".hermes" / "config.yaml"))
     monkeypatch.setenv("ACB_CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("ACB_ZCODE_CONFIG", str(home / ".zcode-config-tmp"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("ACB_VAULT_ADMIN_ENV", raising=False)
@@ -578,7 +579,7 @@ class TestM3PlaneLocationAgreesWithRuntime:
                 providers.shim_name(entry),
                 providers.vault_env_path(entry, known[target.harness]),
             )
-            assert f"ACB_VAULT_ENV={target.path} acb exec" in shim
+            assert f'ACB_VAULT_ENV="{target.path}" acb exec' in shim
 
     def test_plane_targets_delegate_to_the_single_resolver(self) -> None:
         """Guards against a future copy of the resolution rule drifting."""

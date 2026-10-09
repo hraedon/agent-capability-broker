@@ -160,9 +160,10 @@ argv list there is a known-bad hand edit), skills are Claude-shaped
 config file; dot-dirs never enumerated), and both write paths are supported —
 cred discovery skills and e2e `add_mcp` into `mcp.servers` (backup-first,
 clobber-refusing). `ACB_ZCODE_CONFIG` selects the config file; the config root
-is its parent's parent. It stays out of the stable `all` expansion until its
-live interop proof (a real shim discovered by a ZCode session), mirroring the
-Codex rule.
+is its parent's parent. It joined the stable `all` expansion on 2026-10-09 after its live
+interop proof: a fresh ZCode session's skill discovery surfaced every rendered
+shim, descriptions matching the on-disk SKILL.md exactly (mirroring the Codex
+rule, which Codex itself has not yet satisfied).
 
 Beyond the MCP capability layer, each adapter also reads its **command/skill shim
 surface** (`command_shims()`): opencode `command/<name>.md` stems and

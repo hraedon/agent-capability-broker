@@ -167,10 +167,12 @@ live in a *nested* `mcp.servers` object in `~/.zcode/cli/config.json` (command
 string + `args`, not an argv list), skills are Claude-shaped `SKILL.md` under
 `~/.zcode/skills/` — the config *root*, not beside the config file — and both
 the cred-shim and e2e `add_mcp` write paths are supported; `ACB_ZCODE_CONFIG`
-selects the config file for tests/isolation. `acb install-harness all` still
-expands only to the currently supported public adapters, Claude and OpenCode:
-Codex and ZCode join `all` atomically after their live interop proofs, not
-merely because their adapters exist. A supported `--dry-run` exits 2 and keeps
+selects the config file for tests/isolation. `acb install-harness all` expands
+to the supported public adapters, Claude, OpenCode and ZCode — zcode joined
+2026-10-09 after its live interop proof (a fresh ZCode session's skill
+discovery surfaced every rendered shim, descriptions matching the on-disk
+SKILL.md exactly). Codex joins atomically after its own proof, not merely
+because its adapter exists. A supported `--dry-run` exits 2 and keeps
 the same result schema; the aggregate is a no-op only when both concrete
 records are installed no-ops.
 

@@ -132,6 +132,7 @@ def _setup_codex(
         d.mkdir()
         (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n# user's own\n", encoding="utf-8")
     monkeypatch.setenv("ACB_CODEX_HOME", str(home))
+    monkeypatch.setenv("ACB_ZCODE_CONFIG", str(home))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(tmp_path / "no-oc.json"))
@@ -253,8 +254,8 @@ def test_install_harness_codex_refuses_to_clobber_hand_edited_shim(
 def test_install_harness_all_excludes_codex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Plan 007 Decision 2: `all` stays the stable set (claude, opencode) until
-    # Codex conformance is proven; it never silently expands to codex.
+    # Plan 007 Decision 2: `all` stays the stable set (claude, opencode, zcode)
+    # until Codex conformance is proven; it never silently expands to codex.
     home = _setup_codex(tmp_path, monkeypatch)
     monkeypatch.setenv("ACB_TEST_SECRET", "x")
     manifest = _codex_cred_manifest(tmp_path)
@@ -451,6 +452,7 @@ def test_install_harness_all_expands_stable_targets_with_contract_wrapper(
     assert [record["harness"] for record in payload["results"]] == [
         "claude",
         "opencode",
+        "zcode",
     ]
     assert all(record["tool"] == "acb" for record in payload["results"])
     assert all(record["status"] == "installed" for record in payload["results"])
