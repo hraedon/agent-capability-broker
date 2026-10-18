@@ -108,6 +108,30 @@ _SUITE_CHILD_ENV_ALLOWLIST = frozenset(
 _TREE_TERMINATION_GRACE_SECONDS = 2.0
 
 
+def _child_startupinfo() -> subprocess.STARTUPINFO | None:
+    """Windows STARTUPINFO that stops a brokered child flashing a console window.
+
+    When a console-less (GUI) parent launches a console-subsystem child, Windows
+    allocates a brand-new *visible* console window for it — the flash an agent
+    harness sees on every ``acb exec``. ``STARTF_USESHOWWINDOW`` + ``SW_HIDE``
+    suppresses only a window Windows would newly create for the child; it does
+    not detach the console, so the child keeps inheriting stdout/stderr exactly
+    as the exec contract requires (``CREATE_NO_WINDOW`` severs that inheritance
+    and breaks launcher/result capture). Applied to an *inherited* console — a
+    user's real terminal — ``SW_HIDE`` is ignored, so an interactive ``acb``
+    session still shows its output.
+
+    Returns ``None`` off Windows (``startupinfo`` is a no-op there), which is
+    identical to omitting the argument for ``subprocess``.
+    """
+    if os.name != "nt":
+        return None
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return startup
+
+
 class HarnessAdapter(Protocol):
     name: str
 
@@ -471,7 +495,9 @@ class E2eProvider:
         pending_error: RuntimeError | None = None
         try:
             try:
-                result = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
+                result = subprocess.run(  # noqa: S603 (exact caller argv)
+                    argv, env=child_env, startupinfo=_child_startupinfo()
+                )
             except OSError as exc:
                 error_kind = type(exc).__name__
                 terminal = ActionResult(
@@ -771,7 +797,9 @@ def _exec_checkout(
             f"injected {all_vars} into child '{argv[0]}' (invocation {invocation_id})",
         )
         try:
-            completed = subprocess.run(argv, env=child_env)  # noqa: S603 (exact caller argv)
+            completed = subprocess.run(  # noqa: S603 (exact caller argv)
+                argv, env=child_env, startupinfo=_child_startupinfo()
+            )
         except OSError as exc:
             error_kind = type(exc).__name__
             terminal = ActionResult(
@@ -879,6 +907,7 @@ def _terminate_process_tree(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                startupinfo=_child_startupinfo(),
                 timeout=grace_seconds,
                 check=False,
             )
@@ -938,6 +967,7 @@ def _run_contained(
             argv,
             env=env,
             creationflags=creation_flag,
+            startupinfo=_child_startupinfo(),
             close_fds=True,
         )
     else:
@@ -1305,7 +1335,9 @@ class CredProvider:
                     f"injected {sorted(injected)} into child '{argv[0]}'",
                 )
                 try:
-                    legacy_result = subprocess.run(argv, env=legacy_env)  # noqa: S603
+                    legacy_result = subprocess.run(  # noqa: S603
+                        argv, env=legacy_env, startupinfo=_child_startupinfo()
+                    )
                 except OSError as exc:
                     error_kind = type(exc).__name__
                     terminal = ActionResult(

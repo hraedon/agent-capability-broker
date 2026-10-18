@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -500,3 +501,96 @@ class TestWindowsDoctor:
         assert status is Status.UNKNOWN
         assert "intentionally unproven" in detail
         assert fake.resolve_calls == []
+
+
+# ---------------------------------------------------------------------------
+# No console-window flash for brokered children
+# ---------------------------------------------------------------------------
+
+
+class TestNoConsoleWindowFlash:
+    def test_startupinfo_is_none_off_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _PosixOs:
+            name = "posix"
+
+        monkeypatch.setattr(providers, "os", _PosixOs())
+        assert providers._child_startupinfo() is None
+
+    @pytest.mark.skipif(os.name != "nt", reason="STARTUPINFO exists only on Windows")
+    def test_startupinfo_hides_only_newly_created_windows(self) -> None:
+        startup = providers._child_startupinfo()
+        assert startup is not None
+        assert startup.dwFlags & subprocess.STARTF_USESHOWWINDOW
+        assert startup.wShowWindow == subprocess.SW_HIDE
+
+    def test_exec_spawn_passes_startupinfo(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake = FakeResolver(
+            values={
+                "windows:credential/example/lab/username": USER_CANARY.encode(),
+                "windows:credential/example/lab/password": PASS_CANARY.encode(),
+            }
+        )
+        _install_fake(monkeypatch, fake)
+        monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+        argv = [sys.executable, "-c", "pass"]
+        cap = _windows_cap(
+            refs={
+                "username": "windows:credential/example/lab/username",
+                "password": "windows:credential/example/lab/password",
+            },
+            trusted_argv=argv,
+        )
+
+        # Spy on Popen rather than run: every spawn site reaches it, with the
+        # final keyword set, while the child still executes for real.
+        seen_kwargs: list[dict[str, object]] = []
+        real_popen = providers.subprocess.Popen
+
+        def spy_popen(*args: object, **kwargs: object) -> object:
+            seen_kwargs.append(kwargs)
+            return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(providers.subprocess, "Popen", spy_popen)
+        assert CredProvider().exec(cap, argv) == 0
+
+        # Unconditional so the assertion holds off Windows too: every spawn site
+        # passes the same helper, whose value is None where it is a no-op.
+        assert seen_kwargs
+        assert all("startupinfo" in kw for kw in seen_kwargs)
+        if os.name == "nt":
+            for kw in seen_kwargs:
+                startup = kw["startupinfo"]
+                assert isinstance(startup, subprocess.STARTUPINFO)
+                assert startup.wShowWindow == subprocess.SW_HIDE
+
+    def test_termination_spawn_passes_startupinfo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(argv: list[str], **kwargs: object) -> object:
+            assert "startupinfo" in kwargs
+            return providers.subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr(providers.subprocess, "run", fake_run)
+
+        class FakeProcess:
+            pid = 7
+
+            def poll(self) -> int | None:
+                return None
+
+            def kill(self) -> None:
+                raise AssertionError("kill must not be reached")
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+        providers._terminate_process_tree(  # type: ignore[arg-type]
+            FakeProcess(),
+            platform_name="nt",
+            taskkill_path=r"C:\Windows\System32\taskkill.exe",
+            grace_seconds=0.1,
+        )
