@@ -1,0 +1,12 @@
+{
+  "name": "agent-capability-broker-local",
+  "interface": {"displayName": "Agent Capability Broker (local)"},
+  "plugins": [
+    {
+      "name": "agent-capability-broker",
+      "source": {"source": "local", "path": "./plugins/agent-capability-broker"},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+      "category": "Productivity"
+    }
+  ]
+}

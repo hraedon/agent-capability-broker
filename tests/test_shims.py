@@ -72,9 +72,10 @@ def _point_env(monkeypatch: pytest.MonkeyPatch, claude_root: Path, oc_root: Path
     monkeypatch.setenv("ACB_OPENCODE_CONFIG", str(oc_root / "opencode.json"))
     # Point hermes at a temp path so the host's real ~/.hermes doesn't leak in.
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(oc_root / "hermes.yaml"))
-    # Likewise isolate Codex: an unpopulated CODEX_HOME keeps the host's real
-    # ~/.codex out of the parity report (hermetic on any dev box).
+    # Codex configuration and shared skills have independent roots. Isolate
+    # both so the host's ~/.agents/skills cannot leak into parity checks.
     monkeypatch.setenv("ACB_CODEX_HOME", str(oc_root / "codex-home"))
+    monkeypatch.setenv("ACB_CODEX_SKILLS", str(oc_root / "codex-skills"))
     monkeypatch.setenv("ACB_ZCODE_CONFIG", str(oc_root / "codex-home"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
 

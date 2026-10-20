@@ -118,7 +118,7 @@ def _setup_codex(
     ``available()``) plus optional pre-existing user skills and a reserved
     ``.system`` skill acb must neither enumerate nor touch."""
     home = tmp_path / "codex-home"
-    (home / "skills").mkdir(parents=True)
+    (home / "shared-skills").mkdir(parents=True)
     (home / "config.toml").write_text(
         'model = "gpt-5.6"\n\n[mcp_servers.hindsight]\nurl = "https://example/mcp"\n',
         encoding="utf-8",
@@ -128,10 +128,11 @@ def _setup_codex(
     sysskill.mkdir(parents=True)
     (sysskill / "SKILL.md").write_text("---\nname: imagegen\n---\n", encoding="utf-8")
     for name in user_skills or []:
-        d = home / "skills" / name
+        d = home / "shared-skills" / name
         d.mkdir()
         (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n# user's own\n", encoding="utf-8")
     monkeypatch.setenv("ACB_CODEX_HOME", str(home))
+    monkeypatch.setenv("ACB_CODEX_SKILLS", str(home / "shared-skills"))
     monkeypatch.setenv("ACB_ZCODE_CONFIG", str(home))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
@@ -166,7 +167,7 @@ def test_install_harness_codex_creates_skill_shim(
     assert payload["harness"] == "codex"
     assert payload["status"] == "installed"
 
-    shim = home / "skills" / "cred-svc-bot" / "SKILL.md"
+    shim = home / "shared-skills" / "cred-svc-bot" / "SKILL.md"
     assert shim.is_file()
     body = shim.read_text(encoding="utf-8")
     # Codex skills need a `name:` in frontmatter, same as Claude Code.
@@ -189,7 +190,7 @@ def test_install_harness_codex_dry_run_writes_nothing(
         rc = main(["install-harness", "codex", "-m", str(manifest), "--dry-run"])
 
     assert rc == 2
-    assert not (home / "skills" / "cred-svc-bot" / "SKILL.md").exists()
+    assert not (home / "shared-skills" / "cred-svc-bot" / "SKILL.md").exists()
 
 
 def test_install_harness_codex_rerun_is_noop(
@@ -217,7 +218,7 @@ def test_install_harness_codex_preserves_user_skills_and_config(
     monkeypatch.setenv("ACB_TEST_SECRET", "x")
     manifest = _codex_cred_manifest(tmp_path)
     config_before = (home / "config.toml").read_text(encoding="utf-8")
-    user_before = (home / "skills" / "my-notes" / "SKILL.md").read_text(encoding="utf-8")
+    user_before = (home / "shared-skills" / "my-notes" / "SKILL.md").read_text(encoding="utf-8")
     sys_before = (home / "skills" / ".system" / "imagegen" / "SKILL.md").read_text(encoding="utf-8")
 
     with redirect_stdout(io.StringIO()):
@@ -226,10 +227,12 @@ def test_install_harness_codex_preserves_user_skills_and_config(
     assert rc == 0
     # acb never touches Codex config, the user's own skill, or the .system tree.
     assert (home / "config.toml").read_text(encoding="utf-8") == config_before
-    assert (home / "skills" / "my-notes" / "SKILL.md").read_text(encoding="utf-8") == user_before
-    assert (
-        home / "skills" / ".system" / "imagegen" / "SKILL.md"
-    ).read_text(encoding="utf-8") == sys_before
+    assert (home / "shared-skills" / "my-notes" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == user_before
+    assert (home / "skills" / ".system" / "imagegen" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == sys_before
 
 
 def test_install_harness_codex_refuses_to_clobber_hand_edited_shim(
@@ -240,14 +243,16 @@ def test_install_harness_codex_refuses_to_clobber_hand_edited_shim(
     home = _setup_codex(tmp_path, monkeypatch, user_skills=["cred-svc-bot"])
     monkeypatch.setenv("ACB_TEST_SECRET", "x")
     manifest = _codex_cred_manifest(tmp_path)
-    before = (home / "skills" / "cred-svc-bot" / "SKILL.md").read_text(encoding="utf-8")
+    before = (home / "shared-skills" / "cred-svc-bot" / "SKILL.md").read_text(encoding="utf-8")
 
     buf = io.StringIO()
     with redirect_stdout(buf):
         rc = main(["install-harness", "codex", "-m", str(manifest), "--json"])
 
     assert rc == 0
-    assert (home / "skills" / "cred-svc-bot" / "SKILL.md").read_text(encoding="utf-8") == before
+    assert (home / "shared-skills" / "cred-svc-bot" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == before
     assert json.loads(buf.getvalue())["no_op"] is True
 
 

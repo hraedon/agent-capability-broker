@@ -353,7 +353,7 @@ class HermesAdapter:
 
 class CodexAdapter:
     """Codex CLI: ``$CODEX_HOME/config.toml`` -> ``[mcp_servers.*]``; skills at
-    ``$CODEX_HOME/skills/<name>/SKILL.md``.
+    ``$HOME/.agents/skills/<name>/SKILL.md``.
 
     Codex uses the same ``SKILL.md`` skill format as Claude Code (YAML
     frontmatter with ``name:``), discovered under ``skills/``.  Codex's own
@@ -362,7 +362,8 @@ class CodexAdapter:
     parsed with the stdlib ``tomllib``.
 
     ``CODEX_HOME`` (Codex's own env var) selects the config root; ``ACB_CODEX_HOME``
-    overrides it for tests/isolation.  This is the component-owned *direct
+    overrides it for tests/isolation. ``ACB_CODEX_SKILLS`` independently overrides
+    the shared skills root. This is the component-owned *direct
     installer* surface (Plan 007): the operator-facing suite path may instead
     compose these skills into a Codex plugin/marketplace snapshot, which is
     agent-suite's concern, not acb's.
@@ -370,9 +371,13 @@ class CodexAdapter:
 
     name = "codex"
 
-    def __init__(self, codex_home: Path | None = None) -> None:
+    def __init__(self, codex_home: Path | None = None, skills_path: Path | None = None) -> None:
         env = os.environ.get("ACB_CODEX_HOME") or os.environ.get("CODEX_HOME")
         self.codex_home = codex_home or (Path(env) if env else Path.home() / ".codex")
+        skills_env = os.environ.get("ACB_CODEX_SKILLS")
+        self.skills_path = skills_path or (
+            Path(skills_env) if skills_env else Path.home() / ".agents" / "skills"
+        )
 
     @property
     def config_path(self) -> Path:
@@ -380,8 +385,8 @@ class CodexAdapter:
 
     @property
     def shims_path(self) -> Path:
-        """Where Codex keeps skill shims: ``skills/`` under the config root."""
-        return self.codex_home / "skills"
+        """Shared user skills, independent of Codex's config and bundled skills."""
+        return self.skills_path
 
     @property
     def vault_env_path(self) -> Path:

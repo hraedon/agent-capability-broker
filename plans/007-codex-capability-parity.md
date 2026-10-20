@@ -5,6 +5,22 @@
 **Strategic role:** Extend acb's deterministic inspect/plan/apply/exec contract
 to local Codex without turning acb into a Codex config manager or secret store.
 
+## Desktop follow-up (2026-10-15, owner requested)
+
+The existing credential adapter now follows Decision 4: shared skill writes go
+to `$HOME/.agents/skills`, independently of `CODEX_HOME` / `ACB_CODEX_HOME`.
+`ACB_CODEX_SKILLS` isolates this surface for tests. Existing config-root skills
+are preserved; no automatic migration or deletion is attempted. Vault plane
+paths remain config-relative. Create-only behavior and provider gates remain.
+
+A bounded component plugin provides `check-capabilities` and `use-capability`
+workflows, exposed by a repo-local marketplace. It contains no manifest,
+credential, MCP config, executable or server; the installed CLI and operator
+configuration remain prerequisites. See `docs/desktop-codex.md`. Static plugin
+installation does not satisfy live credential or browser interop acceptance.
+Codex remains an explicit target outside stable `all`; MCP mutation and
+ownership-tracked shim uninstall remain unimplemented.
+
 ## Ground truth
 
 - acb currently recognizes Claude, OpenCode, and Hermes. Claude/OpenCode expose
