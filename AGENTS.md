@@ -181,7 +181,9 @@ agent-provenance and follows the family's CLI + skills conventions.
 
 ## Status
 
-Charter stage (2026-06-15). Landed through Plan 005: manifest schema, provider
-interface, harness adapters, and the verbs `doctor`, `shims`, `reconcile`,
-`exec`, and `install-harness`. See `docs/capability-model.md` (design spine)
-and `plans/001`–`plans/005`.
+Reactivated 2026-10-08 (security and break-fix, plus owner-requested
+capability work). Landed through Plan 009: manifest schema, provider
+interface, harness adapters (claude, opencode, zcode in the stable `all` set;
+codex and hermes explicit), and the verbs `doctor`, `shims`, `reconcile`,
+`exec` (incl. composed checkout), `install-harness`, `register` and `onboard`.
+See `docs/capability-model.md` (design spine) and `plans/001`-`plans/009`.

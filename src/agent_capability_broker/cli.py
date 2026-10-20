@@ -1290,7 +1290,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="install shims into one harness and verify capabilities (bootstrap)",
     )
     ih.add_argument(
-        "harness", help="harness to provision (claude, opencode, codex, or all)"
+        "harness",
+        help="harness to provision (claude, opencode, zcode, codex, hermes, or all)",
     )
     ih.add_argument(
         "-m", "--manifest", default=None,
