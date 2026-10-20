@@ -397,7 +397,7 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
             continue
         try:
             result = provider.apply(action, adapter)
-        except (OSError, KeyError) as exc:
+        except (OSError, KeyError, ValueError) as exc:
             result = ActionResult(action, "failed", f"apply error: {exc}")
         provenance.emit(result)
         tag = result.status.upper()
@@ -700,7 +700,7 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
             continue
         try:
             result = provider.apply(action, adapter)
-        except (OSError, KeyError) as exc:
+        except (OSError, KeyError, ValueError) as exc:
             result = ActionResult(action, "failed", f"apply error: {exc}")
         provenance.emit(result)
         action_results.append(result)
@@ -871,7 +871,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
                         f"  [{result.status.upper()}] {harness}: "
                         f"{result.detail or action.summary}"
                     )
-            except (OSError, KeyError) as exc:
+            except (OSError, KeyError, ValueError) as exc:
                 if not args.json:
                     print(f"  [FAILED] {harness}: {exc}")
 

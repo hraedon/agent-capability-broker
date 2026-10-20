@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,13 +29,65 @@ class WriteResult:
         self.backup_path = backup_path
 
 
+class UnsafeConfigError(ValueError):
+    """An existing harness config cannot be parsed, so it must not be rewritten.
+
+    The read path degrades an unparseable config to ``{}`` so ``doctor`` never
+    crashes. The write path must not: serialising "empty plus one new server"
+    over a hand-edited config (opencode accepts JSONC comments, for one) would
+    silently discard every other server entry and the bearer tokens they hold.
+    """
+
+
 def _backup(path: Path) -> Path:
+    """Copy ``path`` aside, no more permissive than the original.
+
+    Harness configs are secret-bearing (bearer tokens in MCP headers). A plain
+    ``write_bytes`` would create the copy with the process umask (typically
+    0644), turning a 0600 config into a world-readable backup. The copy is
+    created exclusively, with the original's owner bits only.
+    """
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     dest = path.with_name(f"{path.name}.bak-{ts}")
     if dest.exists():
         dest = path.with_name(f"{path.name}.bak-{ts}-{os.urandom(4).hex()}")
-    dest.write_bytes(path.read_bytes())
+    mode = stat.S_IMODE(path.stat().st_mode) & (stat.S_IRUSR | stat.S_IWUSR)
+    fd = os.open(
+        str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        mode | stat.S_IRUSR | stat.S_IWUSR,
+    )
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(path.read_bytes())
     return dest
+
+
+def _load_json_for_write(path: Path) -> dict[str, object]:
+    """Strict twin of ``_load_json`` for the act path.
+
+    A missing or blank file is an empty config. Anything else that is not a
+    JSON object raises ``UnsafeConfigError`` instead of degrading to ``{}``.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UnsafeConfigError(
+            f"refusing to rewrite {path}: cannot read it ({type(exc).__name__})"
+        ) from exc
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise UnsafeConfigError(
+            f"refusing to rewrite {path}: not valid JSON ({exc}); fix or remove it first"
+        ) from exc
+    if not isinstance(data, dict):
+        raise UnsafeConfigError(
+            f"refusing to rewrite {path}: top level is {type(data).__name__}, not an object"
+        )
+    return data
 
 
 def _add_server(
@@ -45,7 +98,7 @@ def _add_server(
     `mcp.servers`). Backs up an existing file first; refuses to clobber an
     existing server of the same name (callers check existence for idempotence)."""
     keys = (container_key,) if isinstance(container_key, str) else container_key
-    data = _load_json(path)
+    data = _load_json_for_write(path)
     parent: dict[str, object] = data
     for key in keys[:-1]:
         nxt = parent.get(key)
@@ -72,10 +125,14 @@ def _create_file(path: Path, content: str) -> WriteResult:
     """Write `content` to a new file, creating parents. Refuses to clobber an
     existing file (callers check existence for idempotence — mirrors `_add_server`).
     A freshly created file has nothing to back up."""
-    if path.exists():
-        raise FileExistsError(f"refusing to overwrite existing shim {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    try:
+        # Exclusive create: no window between an existence check and the write
+        # in which a hand-edited shim could appear and be overwritten.
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(content)
+    except FileExistsError:
+        raise FileExistsError(f"refusing to overwrite existing shim {path}") from None
     return WriteResult(changed=True, backup_path=None)
 
 
@@ -236,7 +293,7 @@ class OpencodeAdapter:
         servers (and any bearer tokens/headers they hold) survive byte-for-byte
         in value. Raises if the server is absent or the config is unparseable.
         """
-        data = _load_json(self.config_path)
+        data = _load_json_for_write(self.config_path)
         mcp = data.get("mcp")
         if not isinstance(mcp, dict) or server not in mcp or not isinstance(mcp[server], dict):
             raise KeyError(f"opencode mcp server {server!r} not found in {self.config_path}")
@@ -328,7 +385,7 @@ class HermesAdapter:
                 "pip install 'agent-capability-broker[hermes]'"
             ) from exc
 
-        data = _load_yaml(self.config_path)
+        data = _load_yaml_for_write(self.config_path)
         container = data.get("mcp_servers")
         if not isinstance(container, dict):
             container = {}
@@ -569,3 +626,31 @@ def _load_yaml(path: Path) -> dict[str, object]:
         print(f"warning: {path}: corrupted YAML ({exc}); treating as empty", file=sys.stderr)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _load_yaml_for_write(path: Path) -> dict[str, object]:
+    """Strict twin of ``_load_yaml`` for the act path (see ``_load_json_for_write``)."""
+    import yaml  # noqa: PLC0415 (lazy: callers have already required the [hermes] extra)
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UnsafeConfigError(
+            f"refusing to rewrite {path}: cannot read it ({type(exc).__name__})"
+        ) from exc
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise UnsafeConfigError(
+            f"refusing to rewrite {path}: not valid YAML ({type(exc).__name__}); "
+            "fix or remove it first"
+        ) from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise UnsafeConfigError(
+            f"refusing to rewrite {path}: top level is {type(data).__name__}, not a mapping"
+        )
+    return data
