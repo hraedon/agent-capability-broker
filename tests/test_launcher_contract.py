@@ -195,6 +195,21 @@ class TestLauncherRequest:
                 "A": "1", "B": "2",
             })
 
+    @pytest.mark.parametrize("raw", ["[]", '"text"', "7", "null"])
+    def test_rejects_non_object_receipt(self, raw: str) -> None:
+        """A valid-JSON non-object receipt is a ValueError, not an AttributeError."""
+        with pytest.raises(ValueError, match="JSON object"):
+            LauncherRequest.from_environ({"ACB_CHECKOUT_RECEIPT": raw})
+
+    def test_rejects_non_object_checkout(self) -> None:
+        receipt = json.dumps({
+            "schema": "acb.checkout-receipt.v1",
+            "invocation_id": "x",
+            "checkouts": ["cred:a"],
+        })
+        with pytest.raises(ValueError, match="JSON object"):
+            LauncherRequest.from_environ({"ACB_CHECKOUT_RECEIPT": receipt})
+
     def test_rejects_missing_field_env_var(self) -> None:
         env = self._make_env()
         del env["LAB_PASSWORD"]

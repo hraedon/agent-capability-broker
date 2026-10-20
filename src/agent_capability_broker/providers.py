@@ -1465,7 +1465,8 @@ class CredProvider:
 
         if pending_error is not None:
             raise pending_error
-        assert result is not None
+        if result is None:  # explicit guard; an `assert` would be stripped under `python -O`
+            raise RuntimeError(f"{cap.id}: qualified invocation completed without a child result")
         return result.returncode
 
 

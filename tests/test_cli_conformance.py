@@ -46,6 +46,10 @@ _CLI = (sys.executable, "-m", "agent_capability_broker")
 # are stripped so a populated operator/dev environment can't leak in and make the
 # read non-hermetic.
 _EMPTY_HOME = tempfile.mkdtemp(prefix="acb-conformance-home-")
+# `Path.home()` reads HOME on POSIX but USERPROFILE on Windows; setting only HOME
+# leaves the operator's real profile (and its real harness shim dirs) in scope
+# on Windows, turning this "empty surface" case into a read of live configs.
+_HOME_ENV = {"HOME": _EMPTY_HOME, "USERPROFILE": _EMPTY_HOME}
 _HERMETIC_UNSET = (
     "ACB_MANIFEST",
     "ACB_CLAUDE_SETTINGS",
@@ -107,7 +111,7 @@ SUCCESS_CASES = [
     SuccessCase(
         name="shims-json",
         argv=(*_CLI, "shims", "--json"),
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
         unset_env=_HERMETIC_UNSET,
     ),
     # `onboard` dry-run: derives the plan, contacts nothing, exit 0. Pins the
@@ -119,7 +123,7 @@ SUCCESS_CASES = [
             *_CLI, "onboard", "cred:conformance-bot",
             "--manifest", _ONBOARD_MANIFEST, "--json",
         ),
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
         unset_env=(*_HERMETIC_UNSET, "ACB_VAULT_ADMIN_ENV", "ACB_VAULT_ENV"),
     ),
 ]
@@ -141,7 +145,7 @@ ERROR_CASES = [
             "--manifest", _ONBOARD_MANIFEST, "--json",
         ),
         expect_code="ONBOARD_REFUSED",
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
         unset_env=(*_HERMETIC_UNSET, "ACB_VAULT_ADMIN_ENV"),
     ),
     # `--check` with an unusable admin plane must be an error, never a clean
@@ -154,7 +158,7 @@ ERROR_CASES = [
             "--admin-env", _MISSING_ADMIN_ENV, "--json",
         ),
         expect_code="ONBOARD_REFUSED",
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
         unset_env=_HERMETIC_UNSET,
     ),
     # `--check` offline verified nothing, so it must not report success.
@@ -166,7 +170,7 @@ ERROR_CASES = [
         ),
         expect_code=None,
         json_mode=False,
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
         unset_env=(*_HERMETIC_UNSET, "ACB_VAULT_ADMIN_ENV"),
     ),
     # `--apply` against an admin plane that declares no auth material: refuse,
@@ -180,7 +184,7 @@ ERROR_CASES = [
             "--admin-env", _ADDR_ONLY_ADMIN_ENV, "--json",
         ),
         expect_code="ONBOARD_REFUSED",
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
         unset_env=_HERMETIC_UNSET,
         secret_env_names=("VAULT_TOKEN", "VAULT_SECRET_ID"),
     ),
@@ -212,7 +216,7 @@ BROKEN_PIPE_CASES = [
     BrokenPipeCase(
         name="shims-broken-pipe",
         argv=(*_CLI, "shims", "--json"),
-        env={"HOME": _EMPTY_HOME},
+        env=_HOME_ENV,
     ),
 ]
 
