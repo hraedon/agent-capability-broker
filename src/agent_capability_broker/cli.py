@@ -30,13 +30,22 @@ from .model import (
     parse_manifest,
     resolve_manifest,
 )
-from .providers import PROVIDERS, E2eUnavailable, adapters, exec_composed
+from .providers import (
+    PROVIDERS,
+    E2eUnavailable,
+    _assert_safe_path_component,
+    adapters,
+    exec_composed,
+)
 from .surface import ShimSurface, SurfaceFinding, audit_surface
 
 # zcode joined the stable set 2026-10-09 after its live interop proof
 # (fresh-session skill discovery of all rendered shims, character-exact).
 _STABLE_INSTALL_HARNESSES = ("claude", "opencode", "zcode")
 _CAPABILITY_ID = re.compile(r"^(?:cred|e2e):\S+$")
+# What `register` will write: the id becomes a shim file name in every harness,
+# so it must be a conservative bare name (no quotes, separators or leading dash).
+_REGISTERABLE_ID = re.compile(r"cred:[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def emit_error(
@@ -755,23 +764,79 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _toml_basic_string(value: str) -> str:
+    """Quote ``value`` as a TOML basic string, escaping everything that could end
+    or reshape it (quote, backslash, control characters, DEL)."""
+    escapes = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    out = ['"']
+    for ch in value:
+        if ch in escapes:
+            out.append(escapes[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 def _serialize_toml_value(value: str | list[str]) -> str:
     if isinstance(value, list):
-        return "[" + ", ".join(f'"{v}"' for v in value) + "]"
-    return f'"{value}"'
+        return "[" + ", ".join(_toml_basic_string(v) for v in value) + "]"
+    return _toml_basic_string(value)
 
 
 def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]]) -> str:
-    lines = [f'[capability."{cap_id}"]']
+    lines = [f"[capability.{_toml_basic_string(cap_id)}]"]
     lines.append(f'provider   = {_serialize_toml_value("cred")}')
     for key, value in options.items():
         lines.append(f'{key:<10} = {_serialize_toml_value(value)}')
     return "\n".join(lines) + "\n"
 
 
+def _validate_registration(
+    manifest_path: Path,
+    cap_id: str,
+    options: dict[str, str | list[str]],
+    entry: str,
+) -> str | None:
+    """Parse ``existing manifest + entry`` before anything is written.
+
+    Returns an error message, or ``None`` when the candidate manifest parses and
+    the new capability round-trips exactly as requested. An unvalidated append
+    could leave a manifest that every later ``acb`` command rejects (an id with
+    a traversal sequence) or silently reshape the entry (an unescaped quote).
+    """
+    import tempfile
+
+    try:
+        existing = manifest_path.read_text(encoding="utf-8") if manifest_path.is_file() else ""
+    except OSError as exc:
+        return f"cannot read existing manifest: {exc.strerror or type(exc).__name__}"
+    with tempfile.TemporaryDirectory() as tmp:
+        candidate = Path(tmp) / "capabilities.toml"
+        candidate.write_text(existing + "\n" + entry, encoding="utf-8")
+        try:
+            caps = parse_manifest(candidate)
+        except ManifestError as exc:
+            return (
+                f"refusing to register {cap_id!r}: "
+                f"the resulting manifest would be invalid ({exc})"
+            )
+    added = [c for c in caps if c.id == cap_id]
+    expected = {k: v for k, v in options.items() if k != "harnesses"}
+    if (
+        len(added) != 1
+        or added[0].options != expected
+        or list(added[0].harnesses) != list(options["harnesses"])
+    ):
+        return f"refusing to register {cap_id!r}: the entry does not round-trip as requested"
+    return None
+
+
 def _cmd_register(args: argparse.Namespace) -> int:
     cap_id: str = args.capability_id
-    if not _CAPABILITY_ID.match(cap_id):
+    if not _CAPABILITY_ID.fullmatch(cap_id):
         print(
             f"error: invalid capability ID {cap_id!r} "
             "(must match cred:<name> or e2e:<name>)",
@@ -780,6 +845,14 @@ def _cmd_register(args: argparse.Namespace) -> int:
         return 2
     if not cap_id.startswith("cred:"):
         print("error: register currently supports only cred: capabilities", file=sys.stderr)
+        return 2
+    if not _REGISTERABLE_ID.fullmatch(cap_id):
+        print(
+            f"error: invalid capability ID {cap_id!r} "
+            "(the name after 'cred:' must be letters, digits, '.', '_' or '-', "
+            "starting with a letter or digit)",
+            file=sys.stderr,
+        )
         return 2
 
     for harness in args.harnesses:
@@ -823,7 +896,18 @@ def _cmd_register(args: argparse.Namespace) -> int:
         options["vault_env"] = args.vault_env
     options["harnesses"] = args.harnesses
 
+    if args.vault_env:
+        try:
+            _assert_safe_path_component(args.vault_env, "--vault-env")
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     entry = _serialize_capability_toml(cap_id, options)
+    problem = _validate_registration(manifest_path, cap_id, options, entry)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
 
     if not args.apply:
         if args.json:
@@ -945,7 +1029,7 @@ def _onboard_capability(
     reads (see ``onboard.assert_plane_not_shared``).
     """
     cap_id: str = args.capability_id
-    if not _CAPABILITY_ID.match(cap_id):
+    if not _CAPABILITY_ID.fullmatch(cap_id):
         raise _OnboardUsageError(
             "USAGE_ERROR",
             f"invalid capability ID {cap_id!r} (must match cred:<name> or e2e:<name>)",
