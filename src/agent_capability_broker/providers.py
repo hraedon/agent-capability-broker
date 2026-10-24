@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -108,28 +109,33 @@ _SUITE_CHILD_ENV_ALLOWLIST = frozenset(
 _TREE_TERMINATION_GRACE_SECONDS = 2.0
 
 
-def _child_startupinfo() -> subprocess.STARTUPINFO | None:
-    """Windows STARTUPINFO that stops a brokered child flashing a console window.
+if sys.platform == "win32":
+    def _child_startupinfo() -> subprocess.STARTUPINFO | None:
+        """Windows STARTUPINFO that stops a brokered child flashing a console window.
 
-    When a console-less (GUI) parent launches a console-subsystem child, Windows
-    allocates a brand-new *visible* console window for it — the flash an agent
-    harness sees on every ``acb exec``. ``STARTF_USESHOWWINDOW`` + ``SW_HIDE``
-    suppresses only a window Windows would newly create for the child; it does
-    not detach the console, so the child keeps inheriting stdout/stderr exactly
-    as the exec contract requires (``CREATE_NO_WINDOW`` severs that inheritance
-    and breaks launcher/result capture). Applied to an *inherited* console — a
-    user's real terminal — ``SW_HIDE`` is ignored, so an interactive ``acb``
-    session still shows its output.
+        When a console-less (GUI) parent launches a console-subsystem child, Windows
+        allocates a brand-new *visible* console window for it — the flash an agent
+        harness sees on every ``acb exec``. ``STARTF_USESHOWWINDOW`` + ``SW_HIDE``
+        suppresses only a window Windows would newly create for the child; it does
+        not detach the console, so the child keeps inheriting stdout/stderr exactly
+        as the exec contract requires (``CREATE_NO_WINDOW`` severs that inheritance
+        and breaks launcher/result capture). Applied to an *inherited* console — a
+        user's real terminal — ``SW_HIDE`` is ignored, so an interactive ``acb``
+        session still shows its output.
 
-    Returns ``None`` off Windows (``startupinfo`` is a no-op there), which is
-    identical to omitting the argument for ``subprocess``.
-    """
-    if os.name != "nt":
+        Returns ``None`` off Windows (``startupinfo`` is a no-op there), which is
+        identical to omitting the argument for ``subprocess``.
+        """
+        if os.name != "nt":
+            return None
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        return startup
+else:
+    def _child_startupinfo() -> None:
+        """No console startup options apply on non-Windows platforms."""
         return None
-    startup = subprocess.STARTUPINFO()
-    startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
-    startup.wShowWindow = subprocess.SW_HIDE
-    return startup
 
 
 class HarnessAdapter(Protocol):
@@ -495,8 +501,11 @@ class E2eProvider:
         pending_error: RuntimeError | None = None
         try:
             try:
+                startupinfo = None
+                if sys.platform == "win32":
+                    startupinfo = _child_startupinfo()
                 result = subprocess.run(  # noqa: S603 (exact caller argv)
-                    argv, env=child_env, startupinfo=_child_startupinfo()
+                    argv, env=child_env, startupinfo=startupinfo,
                 )
             except OSError as exc:
                 error_kind = type(exc).__name__
@@ -797,8 +806,11 @@ def _exec_checkout(
             f"injected {all_vars} into child '{argv[0]}' (invocation {invocation_id})",
         )
         try:
+            startupinfo = None
+            if sys.platform == "win32":
+                startupinfo = _child_startupinfo()
             completed = subprocess.run(  # noqa: S603 (exact caller argv)
-                argv, env=child_env, startupinfo=_child_startupinfo()
+                argv, env=child_env, startupinfo=startupinfo,
             )
         except OSError as exc:
             error_kind = type(exc).__name__
@@ -902,12 +914,15 @@ def _terminate_process_tree(
         if taskkill_path is None:
             raise RuntimeError("Windows process-tree containment is unavailable")
         try:
+            startupinfo = None
+            if sys.platform == "win32":
+                startupinfo = _child_startupinfo()
             completed = subprocess.run(  # noqa: S603 (trusted system executable)
                 [taskkill_path, "/PID", str(process.pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                startupinfo=_child_startupinfo(),
+                startupinfo=startupinfo,
                 timeout=grace_seconds,
                 check=False,
             )
@@ -959,22 +974,28 @@ def _run_contained(
     taskkill_path: str | None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an exact command in an owned process group; contain on every interruption."""
+    startupinfo = None
     if os.name == "nt":
         creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         if not creation_flag or taskkill_path is None:
             raise RuntimeError("Windows process-tree containment is unavailable")
+        if sys.platform == "win32":
+            startupinfo = _child_startupinfo()
         process = subprocess.Popen(  # noqa: S603 (exact trusted argv)
             argv,
             env=env,
             creationflags=creation_flag,
-            startupinfo=_child_startupinfo(),
+            startupinfo=startupinfo,
             close_fds=True,
         )
     else:
+        if sys.platform == "win32":
+            startupinfo = _child_startupinfo()
         process = subprocess.Popen(  # noqa: S603 (exact trusted argv)
             argv,
             env=env,
             start_new_session=True,
+            startupinfo=startupinfo,
             close_fds=True,
         )
     try:
@@ -1335,8 +1356,11 @@ class CredProvider:
                     f"injected {sorted(injected)} into child '{argv[0]}'",
                 )
                 try:
+                    startupinfo = None
+                    if sys.platform == "win32":
+                        startupinfo = _child_startupinfo()
                     legacy_result = subprocess.run(  # noqa: S603
-                        argv, env=legacy_env, startupinfo=_child_startupinfo()
+                        argv, env=legacy_env, startupinfo=startupinfo,
                     )
                 except OSError as exc:
                     error_kind = type(exc).__name__
