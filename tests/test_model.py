@@ -75,6 +75,69 @@ def test_id_prefix_mismatch_rejected(tmp_path: Path) -> None:
         parse_manifest(p)
 
 
+@pytest.mark.parametrize("provider", [
+    "[]", '{}', '["DO_NOT_ECHO_MALFORMED_VALUE"]',
+    '{value="DO_NOT_ECHO_MALFORMED_VALUE"}', "true", "7", "1.5",
+    "1979-05-27", "07:32:00", "1979-05-27T07:32:00Z",
+])
+def test_non_string_provider_is_manifest_error(tmp_path: Path, provider: str) -> None:
+    path = _write(
+        tmp_path,
+        f'[capability."cred:example"]\nprovider={provider}\nharnesses=["claude"]\n',
+    )
+    with pytest.raises(ManifestError) as error:
+        parse_manifest(path)
+    assert "DO_NOT_ECHO_MALFORMED_VALUE" not in str(error.value)
+
+
+@pytest.mark.parametrize("harnesses", [
+    "[[]]", "[{}]", '[7,"unknown"]', '[true,"unknown"]',
+    '["claude",["DO_NOT_ECHO_MALFORMED_VALUE"]]',
+    '[{value="DO_NOT_ECHO_MALFORMED_VALUE"}]',
+    "[true]", "[7]", "[1.5]", "[1979-05-27]", "[07:32:00]",
+    "[1979-05-27T07:32:00Z]",
+])
+def test_non_string_harness_is_manifest_error(tmp_path: Path, harnesses: str) -> None:
+    path = _write(
+        tmp_path,
+        f'[capability."cred:example"]\nprovider="cred"\nharnesses={harnesses}\n',
+    )
+    with pytest.raises(ManifestError) as error:
+        parse_manifest(path)
+    assert "DO_NOT_ECHO_MALFORMED_VALUE" not in str(error.value)
+
+
+@pytest.mark.parametrize("provider", ["cred", "e2e"])
+def test_valid_core_fields_preserve_order_duplicates_and_options(
+    tmp_path: Path, provider: str,
+) -> None:
+    path = _write(
+        tmp_path,
+        f'[capability."{provider}:example"]\nprovider="{provider}"\n'
+        'harnesses=["zcode","hermes","codex","opencode","claude","zcode"]\n'
+        'custom={enabled=true,threshold=1.5}\n',
+    )
+    [capability] = parse_manifest(path)
+    assert capability.provider == provider
+    assert capability.harnesses == ("zcode", "hermes", "codex", "opencode", "claude", "zcode")
+    assert capability.options == {"custom": {"enabled": True, "threshold": 1.5}}
+
+
+@pytest.mark.parametrize(("fields", "message"), [
+    ('harnesses=["claude"]', "unknown or missing provider"),
+    ('provider=""\nharnesses=["claude"]', "unknown or missing provider"),
+    ('provider="cred"', "'harnesses' must be a non-empty list"),
+    ('provider="cred"\nharnesses=[]', "'harnesses' must be a non-empty list"),
+    ('provider="cred"\nharnesses="claude"', "'harnesses' must be a non-empty list"),
+])
+def test_missing_and_empty_core_fields_keep_existing_errors(
+    tmp_path: Path, fields: str, message: str,
+) -> None:
+    path = _write(tmp_path, f'[capability."cred:example"]\n{fields}\n')
+    with pytest.raises(ManifestError, match=message):
+        parse_manifest(path)
+
+
 # --- manifest discovery (CWD-independent) -----------------------------------
 # Regression for the cross-harness failure: acb resolved `capabilities.toml`
 # against CWD only, so from any directory but its own repo it could not find the

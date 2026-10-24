@@ -211,6 +211,8 @@ def parse_manifest(path: Path) -> list[Capability]:
         if not isinstance(body, dict):
             raise ManifestError(f"capability {cap_id!r} is not a table")
         provider = body.get("provider")
+        if provider is not None and not isinstance(provider, str):
+            raise ManifestError(f"capability {cap_id!r}: 'provider' must be a string")
         if provider not in KNOWN_PROVIDERS:
             raise ManifestError(
                 f"capability {cap_id!r}: unknown or missing provider {provider!r} "
@@ -230,6 +232,8 @@ def parse_manifest(path: Path) -> list[Capability]:
         harnesses = body.get("harnesses")
         if not isinstance(harnesses, list) or not harnesses:
             raise ManifestError(f"capability {cap_id!r}: 'harnesses' must be a non-empty list")
+        if not all(isinstance(harness, str) for harness in harnesses):
+            raise ManifestError(f"capability {cap_id!r}: 'harnesses' entries must be strings")
         unknown = set(harnesses) - KNOWN_HARNESSES
         if unknown:
             raise ManifestError(

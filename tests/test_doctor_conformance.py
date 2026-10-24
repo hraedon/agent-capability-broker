@@ -151,6 +151,55 @@ def _run_doctor_json(manifest: Path) -> tuple[dict, int]:
     return json.loads(buf.getvalue()), rc
 
 
+@pytest.mark.parametrize(("provider", "harnesses"), [
+    ("[]", '["claude"]'),
+    ('{value="DO_NOT_ECHO_MALFORMED_VALUE"}', '["claude"]'),
+    ('["DO_NOT_ECHO_MALFORMED_VALUE"]', '["claude"]'),
+    ('"cred"', "[[]]"),
+    ('"cred"', '[{value="DO_NOT_ECHO_MALFORMED_VALUE"}]'),
+    ('"cred"', '[7,"unknown"]'),
+    ('"cred"', '[true,"unknown"]'),
+])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_doctor_malformed_core_fields_are_manifest_errors_before_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    provider: str, harnesses: str, json_output: bool,
+) -> None:
+    from agent_capability_broker import cli
+
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        f'[capability."cred:example"]\nprovider={provider}\nharnesses={harnesses}\n',
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def forbidden_inspection(*args: object, **kwargs: object) -> None:
+        calls.append("inspection")
+        pytest.fail("invalid manifest must not inspect any harness or provider")
+
+    monkeypatch.setattr(cli, "adapters", forbidden_inspection)
+    monkeypatch.setattr(cli, "_surface_findings", forbidden_inspection)
+    args = ["doctor", "--manifest", str(manifest)]
+    if json_output:
+        args.append("--json")
+    assert main(args) == 1
+    captured = capsys.readouterr()
+    assert calls == []
+    assert "DO_NOT_ECHO_MALFORMED_VALUE" not in captured.out + captured.err
+    assert "Traceback" not in captured.out + captured.err
+    if json_output:
+        payload = json.loads(captured.out)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "MANIFEST_ERROR"
+        assert payload["error"]["retryable"] is False
+        assert captured.err == ""
+    else:
+        assert captured.out == ""
+        assert captured.err.startswith("error: capability 'cred:example':")
+        assert "unexpected TypeError" not in captured.err
+
+
 def test_doctor_json_healthy_classifies_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
