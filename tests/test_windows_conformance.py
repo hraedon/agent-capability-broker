@@ -8,11 +8,13 @@ Windows host.  Live Windows proof is a separately gated credential job.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -509,6 +511,97 @@ class TestWindowsDoctor:
 
 
 class TestNoConsoleWindowFlash:
+    @pytest.mark.parametrize(("platform", "os_name"), [
+        ("win32", "nt"), ("win32", "posix"), ("linux", "posix"), ("darwin", "posix"),
+    ])
+    def test_startup_helper_platform_shapes(self, platform: str, os_name: str) -> None:
+        """Execute only the exact helper source with synthetic platform APIs.
+
+        This covers the Windows definition on Linux without changing global
+        sys.platform or importing a credential/backend implementation. The
+        native Windows test below still verifies the real subprocess type.
+        """
+        source = ast.parse(Path(providers.__file__).read_text(encoding="utf-8"))
+        definitions = [
+            node for node in source.body
+            if isinstance(node, (ast.FunctionDef, ast.If)) and any(
+                isinstance(child, ast.FunctionDef) and child.name == "_child_startupinfo"
+                for child in ast.walk(node)
+            )
+        ]
+        assert len(definitions) == 1
+        future = ast.parse("from __future__ import annotations\n").body
+        helper_module = ast.Module(body=[*future, *definitions], type_ignores=[])
+        constructed: list[object] = []
+
+        class SyntheticStartupInfo:
+            def __init__(self) -> None:
+                self.dwFlags = 0
+                self.wShowWindow = 1
+                constructed.append(self)
+
+        windows_api = SimpleNamespace(
+            STARTUPINFO=SyntheticStartupInfo, STARTF_USESHOWWINDOW=1, SW_HIDE=0,
+        )
+        namespace = {
+            "sys": SimpleNamespace(platform=platform),
+            "os": SimpleNamespace(name=os_name),
+            "subprocess": windows_api if platform == "win32" else SimpleNamespace(),
+        }
+        exec(compile(helper_module, providers.__file__, "exec"), namespace)
+        startup = namespace["_child_startupinfo"]()
+        if platform == "win32" and os_name == "nt":
+            assert type(startup) is SyntheticStartupInfo
+            assert constructed == [startup]
+            assert startup.dwFlags == windows_api.STARTF_USESHOWWINDOW
+            assert startup.wShowWindow == windows_api.SW_HIDE
+        else:
+            assert startup is None
+            assert constructed == []
+
+    def test_posix_contained_spawn_preserves_process_controls(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        argv = ["/synthetic/example", "--validate"]
+        env = {"EXAMPLE_VALUE": "synthetic"}
+        spawns: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        waits: list[float | None] = []
+        group_checks: list[tuple[int, int]] = []
+
+        class SyntheticProcess:
+            pid = 101
+
+            def wait(self, timeout: float | None = None) -> int:
+                waits.append(timeout)
+                return 3
+
+        def popen(*args: object, **kwargs: object) -> SyntheticProcess:
+            spawns.append((args, kwargs))
+            return SyntheticProcess()
+
+        def killpg(pid: int, sig: int) -> None:
+            group_checks.append((pid, sig))
+            raise ProcessLookupError
+
+        def forbidden_termination(*args: object, **kwargs: object) -> None:
+            pytest.fail("an already-exited synthetic process group must not be terminated")
+
+        monkeypatch.setattr(providers, "os", SimpleNamespace(name="posix", killpg=killpg))
+        monkeypatch.setattr(providers.subprocess, "Popen", popen)
+        monkeypatch.setattr(providers, "_terminate_process_tree", forbidden_termination)
+        completed = providers._run_contained(
+            argv, env=env, timeout_seconds=0.25, taskkill_path=None,
+        )
+        assert spawns == [((argv,), {
+            "env": env, "start_new_session": True, "startupinfo": None, "close_fds": True,
+        })]
+        assert spawns[0][1]["env"] is env
+        assert env == {"EXAMPLE_VALUE": "synthetic"}
+        assert waits == [0.25]
+        assert group_checks == [(101, 0)]
+        assert completed.args == argv
+        assert completed.returncode == 3
+
     def test_startupinfo_is_none_off_windows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
