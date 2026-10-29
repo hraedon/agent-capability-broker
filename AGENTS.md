@@ -41,10 +41,12 @@ important rule here. Read the Hard rules.
 - **Inject, don't surface.** The default credential verb injects into the child
   process (env / short-lived temp file) and never returns the secret to the
   model's context through ACB-controlled output. Agents log everything; a
-  brokered secret in a transcript is a leaked secret. For `source = "suite"`,
-  the exact manifest-qualified child inherits stdout/stderr and is itself part
-  of the trust boundary; never substitute a shell, interpreter, or unreviewed
-  wrapper. `get` exists as an escape hatch and must be explicit.
+  brokered secret in a transcript is a leaked secret. For every `cred` source,
+  `acb exec` runs only the capability's exact manifest `trusted_argv` (required;
+  first element never a shell or interpreter, e.g. `acb exec cred:x -- env` is
+  refused before any value is resolved). That qualified child inherits
+  stdout/stderr and is itself part of the trust boundary; never substitute a
+  shell, interpreter, or unreviewed wrapper. `get` exists as an escape hatch and must be explicit.
 - **`acb` is a client, never a store.** No credential, token, or browser session
   is persisted in `acb`'s own state. Vault is the credential backend; a remote
   browser endpoint is the E2E backend. `acb` holds neither at rest.

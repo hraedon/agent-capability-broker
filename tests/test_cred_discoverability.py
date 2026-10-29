@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from _childpy import EXAMPLE_TOOL, TRUSTED_TOML
 
 from agent_capability_broker import cred_vault
 from agent_capability_broker.adapters import ClaudeAdapter, OpencodeAdapter
@@ -20,7 +21,10 @@ from agent_capability_broker.cli import main
 from agent_capability_broker.model import Capability, Status
 from agent_capability_broker.providers import CredProvider, _cred_shim_name, _render_cred_shim
 
-VAULT_CAP = Capability("cred:svc-bot", "cred", ("opencode",), {"vault": "kv/example/ad/svc-bot"})
+VAULT_CAP = Capability(
+    "cred:svc-bot", "cred", ("opencode",),
+    {"vault": "kv/example/ad/svc-bot", "trusted_argv": [EXAMPLE_TOOL]},
+)
 
 
 def _opencode(root: Path, *, shims: list[str] | None = None) -> OpencodeAdapter:
@@ -81,7 +85,10 @@ def test_inspect_unknown_when_reachability_uncheckable(
 
 
 def test_inspect_env_source_reachability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = Capability("cred:db", "cred", ("opencode",), {"source": "env", "from_env": "ACB_T"})
+    cap = Capability(
+        "cred:db", "cred", ("opencode",),
+        {"source": "env", "from_env": "ACB_T", "trusted_argv": [EXAMPLE_TOOL]},
+    )
     adapter = _opencode(tmp_path, shims=["cred-db"])
     monkeypatch.delenv("ACB_T", raising=False)
     assert CredProvider().inspect(cap, "opencode", adapter).status is Status.PRESENT_BROKEN
@@ -108,7 +115,7 @@ def test_inspect_probes_per_capability_vault_env_plane(
     cap = Capability(
         "cred:ldap-bind", "cred", ("opencode",),
         {"vault": "kv/cert-watch/ldap/bind", "field": "password",
-         "vault_env": "cert-watch.env"},
+         "vault_env": "cert-watch.env", "trusted_argv": [EXAMPLE_TOOL]},
     )
     v = CredProvider().inspect(cap, "opencode", adapter)
     assert v.status is Status.PRESENT_OK
@@ -198,7 +205,7 @@ def test_plan_renders_per_capability_vault_env(tmp_path: Path) -> None:
     cap = Capability(
         "cred:ldap-bind", "cred", ("opencode",),
         {"vault": "kv/cert-watch/ldap/bind", "fields": ["bind_dn", "password"],
-         "vault_env": "cert-watch.env"},
+         "vault_env": "cert-watch.env", "trusted_argv": [EXAMPLE_TOOL]},
     )
     plan = CredProvider().plan_reconcile(cap, "opencode", adapter)
     content = str(plan[0].payload["content"])
@@ -235,7 +242,9 @@ def test_apply_renders_opencode_shim_idempotently(tmp_path: Path) -> None:
 
 
 def test_apply_renders_claude_skill(tmp_path: Path) -> None:
-    cap = Capability("cred:svc-bot", "cred", ("claude",))
+    cap = Capability(
+        "cred:svc-bot", "cred", ("claude",), {"trusted_argv": [EXAMPLE_TOOL]}
+    )
     adapter = ClaudeAdapter(settings_path=tmp_path / "settings.json")
     plan = CredProvider().plan_reconcile(cap, "claude", adapter)
     CredProvider().apply(plan[0], adapter)
@@ -258,7 +267,7 @@ def test_cli_doctor_reconcile_roundtrip(
 
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_SECRET"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )

@@ -55,8 +55,17 @@ class BrokerStartupError(RuntimeError):
     """The broker cannot start safely (bad socket dir, already running, ...)."""
 
 
+_POSIX_ONLY = "acb-broker is POSIX-only (it needs AF_UNIX peer credentials and uids)"
+# Every function below that touches an AF_UNIX / uid / rlimit API opens with
+# `if sys.platform == "win32": raise ...`. That is not just a runtime refusal:
+# mypy narrows on a literal `sys.platform` comparison, so the POSIX-only
+# attributes are not type-checked (and not reported missing) on the Windows lane.
+
+
 def peercred(conn: socket.socket) -> Peer:
     """``SO_PEERCRED`` on Linux: the connecting process's pid/uid/gid."""
+    if sys.platform == "win32":
+        raise BrokerStartupError(_POSIX_ONLY)
     raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
     pid, uid, gid = struct.unpack("3i", raw)
     return Peer(pid=pid, uid=uid, gid=gid)
@@ -68,6 +77,8 @@ def harden_process() -> list[str]:
     Best effort; returns what could not be applied. Root in the VM is not
     stopped by either — that is the accepted boundary.
     """
+    if sys.platform == "win32":
+        return ["RLIMIT_CORE", "PR_SET_DUMPABLE"]  # neither exists; nothing was applied
     failed: list[str] = []
     try:
         import resource
@@ -84,7 +95,16 @@ def harden_process() -> list[str]:
     return failed
 
 
+def _default_allowed_uids() -> frozenset[int]:
+    """The broker's own uid and root's (the VM is the trust boundary)."""
+    if sys.platform == "win32":
+        raise BrokerStartupError(_POSIX_ONLY)
+    return frozenset({os.geteuid(), 0})
+
+
 def _prepare_socket_dir(directory: Path) -> None:
+    if sys.platform == "win32":
+        raise BrokerStartupError(_POSIX_ONLY)
     euid = os.geteuid()
     if not directory.exists():
         directory.mkdir(mode=0o700, parents=True)
@@ -100,6 +120,8 @@ def _prepare_socket_dir(directory: Path) -> None:
 
 
 def _clear_stale_socket(path: Path) -> None:
+    if sys.platform == "win32":
+        raise BrokerStartupError(_POSIX_ONLY)
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -136,7 +158,7 @@ class BrokerServer:
         self._timeout = conn_timeout
         self._slots = threading.BoundedSemaphore(max_workers)
         self._reap_interval = reap_interval
-        self._allowed = allowed_uids if allowed_uids is not None else frozenset({os.geteuid(), 0})
+        self._allowed = allowed_uids if allowed_uids is not None else _default_allowed_uids()
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
         self._workers: set[threading.Thread] = set()
@@ -147,6 +169,8 @@ class BrokerServer:
     # ------------------------------------------------------------ lifecycle
 
     def bind(self) -> None:
+        if sys.platform == "win32":
+            raise BrokerStartupError(_POSIX_ONLY)
         _prepare_socket_dir(self.socket_path.parent)
         _clear_stale_socket(self.socket_path)
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

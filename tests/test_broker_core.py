@@ -39,9 +39,10 @@ from agent_capability_broker.broker.issuers import (
 from agent_capability_broker.broker.registry import Registry, read_state
 from agent_capability_broker.broker.service import Broker, Peer, provenance_events
 
-pytestmark = pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="acb-broker is Linux-only"
-)
+# Skip at import time, not with a mark: module-level code below calls POSIX-only
+# APIs (os.getuid), which would raise at collection on Windows.
+if not sys.platform.startswith("linux"):
+    pytest.skip("acb-broker is Linux-only", allow_module_level=True)
 
 CANARY = "canary-v4lue-9d1e-must-not-persist"
 FORGE = "forge.example.test"

@@ -19,6 +19,7 @@ from contextlib import redirect_stdout, suppress
 from pathlib import Path
 
 from . import onboard, provenance
+from .boundary import BoundaryCheck, run_boundary_checks
 from .model import (
     KNOWN_HARNESSES,
     Action,
@@ -27,10 +28,14 @@ from .model import (
     ManifestError,
     Status,
     Verdict,
+    assurance_rank,
+    derive_assurance,
+    parse_boundary,
     parse_manifest,
     resolve_manifest,
 )
 from .providers import PROVIDERS, E2eUnavailable, adapters, exec_composed
+from .secret_sources import SecretSourceConfigError, validate_cred_trusted_argv
 from .surface import ShimSurface, SurfaceFinding, audit_surface
 
 # zcode joined the stable set 2026-10-09 after its live interop proof
@@ -192,6 +197,51 @@ def _surface_checks(findings: list[SurfaceFinding]) -> list[dict[str, object]]:
     ]
 
 
+def _assurance_checks(caps: list[Capability]) -> list[dict[str, object]]:
+    """Per-capability assurance report (Plan 012 §5): effective level vs declared floor.
+
+    The effective level is derived deterministically from the manifest entry
+    (`derive_assurance`). Below the declared floor is a hard ``fail``; a ``D0``
+    capability with no declared floor is a ``warn`` -- reported honestly, never
+    passed. Capabilities that hold no credential (a v1 ``e2e`` entry) are not
+    judged unless they declare a v2 key.
+    """
+    checks: list[dict[str, object]] = []
+    for cap in caps:
+        if cap.provider != "cred" and not cap.declares_v2:
+            continue
+        effective, reason = derive_assurance(cap)
+        floor = cap.declared_assurance
+        if floor is not None and assurance_rank(effective) < assurance_rank(floor):
+            status = "fail"
+            detail = f"effective {effective} is below the declared floor {floor} ({reason})"
+        elif floor is None and effective == "D0":
+            status = "warn"
+            detail = f"D0: a standing secret in the VM, with no assurance floor declared ({reason})"
+        elif floor is None:
+            status = "ok"
+            detail = f"effective {effective}; no floor declared ({reason})"
+        elif effective == "D0":
+            status = "ok"
+            detail = f"effective D0 meets the declared floor D0 (acknowledged; {reason})"
+        else:
+            status = "ok"
+            detail = f"effective {effective} meets the declared floor {floor} ({reason})"
+        checks.append(
+            {
+                "name": f"{cap.id}@assurance",
+                "capability": cap.id,
+                "harness": None,
+                "status": status,
+                "detail": detail,
+                "kind": "assurance",
+                "effective": effective,
+                "declared": floor,
+            }
+        )
+    return checks
+
+
 def _classify_health(checks: list[dict[str, object]]) -> tuple[bool, bool]:
     """Classify component health from checks the way the siblings do.
 
@@ -212,6 +262,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         manifest_path = resolve_manifest(args.manifest)
         verdicts = _inspect_all(manifest_path)
         findings = _surface_findings(manifest_path)
+        assurance = _assurance_checks(parse_manifest(manifest_path))
+        boundary: list[BoundaryCheck] = []
+        if getattr(args, "boundary", False):
+            boundary = run_boundary_checks(parse_boundary(manifest_path))
     except ManifestError as exc:
         # A missing or malformed manifest is an *operational* failure, not a
         # usage error: emit the contract-v1 envelope (§3) and exit 1, not 2.
@@ -219,7 +273,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         # reclassification — acb WI-014 defers that; this read-only path is safe.)
         return emit_error("MANIFEST_ERROR", str(exc), use_json=args.json)
 
-    checks = _doctor_checks(verdicts) + _surface_checks(findings)
+    checks = (
+        _doctor_checks(verdicts)
+        + _surface_checks(findings)
+        + assurance
+        + [b.as_check() for b in boundary]
+    )
     ok, degraded = _classify_health(checks)
 
     if args.json:
@@ -243,6 +302,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _print_table(verdicts)
         for finding in findings:
             print(f"{finding.status.upper():<5} {finding.name}  ({finding.detail})")
+        for a in assurance:
+            print(f"{str(a['status']).upper():<5} {a['name']}  ({a['detail']})")
+        for b in boundary:
+            print(f"{b.verdict.upper():<7} {b.name}  ({b.detail})")
 
     # Exit-code consistent with the JSON verdict (sibling convention: exit 0
     # for ok and degraded, non-zero on a hard fail). Same parity gate as before
@@ -757,8 +820,8 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
 
 def _serialize_toml_value(value: str | list[str]) -> str:
     if isinstance(value, list):
-        return "[" + ", ".join(f'"{v}"' for v in value) + "]"
-    return f'"{value}"'
+        return "[" + ", ".join(json.dumps(v) for v in value) + "]"
+    return json.dumps(value)
 
 
 def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]]) -> str:
@@ -791,6 +854,19 @@ def _cmd_register(args: argparse.Namespace) -> int:
             )
             return 2
 
+    # Every cred capability runs only its exact trusted_argv (Plan 012 section 5):
+    # refuse to write an entry that could never exec.
+    try:
+        validate_cred_trusted_argv(
+            Capability(
+                cap_id, "cred", tuple(args.harnesses),
+                {"trusted_argv": list(args.trusted_argv)},
+            )
+        )
+    except SecretSourceConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     manifest_path = resolve_manifest(getattr(args, "manifest", None))
 
     existing: list[Capability] = []
@@ -821,6 +897,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
         options["env_prefix"] = args.env_prefix
     if args.vault_env:
         options["vault_env"] = args.vault_env
+    options["trusted_argv"] = list(args.trusted_argv)
     options["harnesses"] = args.harnesses
 
     entry = _serialize_capability_toml(cap_id, options)
@@ -1173,6 +1250,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON (suite health shape)")
+    doctor.add_argument(
+        "--boundary", action="store_true",
+        help="also check the blast-radius rule (read-only): kubeconfig reach, the VM's "
+             "Vault identity, declared admin SSH targets",
+    )
     doctor.set_defaults(func=_cmd_doctor)
 
     shims = sub.add_parser(
@@ -1230,6 +1312,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="secret fields to expose (e.g. token, or username password)",
     )
     reg.add_argument("--env-prefix", help="env var prefix for injection (e.g. PYPI → PYPI_TOKEN)")
+    reg.add_argument(
+        "--trusted-argv", nargs=argparse.REMAINDER, required=True, metavar="ARG",
+        help="the exact command `acb exec` may run with this credential: an absolute "
+             "executable path (not a shell or interpreter) followed by its arguments; "
+             "must be the last option (everything after it is the command)",
+    )
     reg.add_argument(
         "--vault-env", help="per-plane AppRole .env file (for non-default access planes)"
     )

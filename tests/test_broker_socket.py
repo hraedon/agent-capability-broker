@@ -42,9 +42,9 @@ from agent_capability_broker.broker.registry import Registry, read_state
 from agent_capability_broker.broker.server import BrokerServer
 from agent_capability_broker.broker.service import Broker, Peer, provenance_events
 
-pytestmark = pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="acb-broker is Linux-only"
-)
+# Skip at import time, not with a mark, so nothing below is evaluated off Linux.
+if not sys.platform.startswith("linux"):
+    pytest.skip("acb-broker is Linux-only", allow_module_level=True)
 
 CANARY = "canary-s0cket-41b7-must-not-leak"
 FORGE = "forge.example.test"

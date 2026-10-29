@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -120,7 +121,10 @@ def write_state(path: Path, checkouts: Iterable[Checkout]) -> None:
     doc = {"schema": STATE_SCHEMA, "checkouts": [co.record() for co in checkouts]}
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".acb-broker-state.", suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)
+        if sys.platform != "win32":
+            # mkstemp already creates the file owner-only on POSIX; this makes
+            # that explicit. Windows has no fchmod (and no mode bits to set).
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write("\n")
