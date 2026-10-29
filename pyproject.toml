@@ -63,6 +63,11 @@ Issues = "https://github.com/hraedon/agent-capability-broker/issues"
 
 [project.scripts]
 acb = "agent_capability_broker.cli:main"
+# acb-broker (Plan 012 WI-012-3): the in-VM broker daemon and its helper
+# front-ends. Linux-only at runtime; stdlib-only like the core.
+acb-broker = "agent_capability_broker.broker.server:main"
+acb-git-credential = "agent_capability_broker.broker.git_credential:main"
+acb-kube-credential = "agent_capability_broker.broker.kube_credential:main"
 
 [build-system]
 requires = ["hatchling"]

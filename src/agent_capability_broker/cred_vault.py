@@ -339,13 +339,22 @@ def _split_mount(path: str) -> tuple[str, str]:
     return head, tail
 
 
-def authenticated_client(vault_env: str | os.PathLike[str] | None = None) -> object:
+def authenticated_client(
+    env_path: str | os.PathLike[str] | None = None, *, allow_token: bool = True
+) -> object:
     """An hvac client logged in by the resolved access plane, or ``RuntimeError``.
 
-    The one place a read-path probe builds a Vault client, so every probe keeps
-    the two WI-016 invariants: the client is constructed with ``token=""`` (never
-    ``None`` -- hvac would otherwise read ``$VAULT_TOKEN`` and ``~/.vault-token``)
-    and declared-but-incomplete AppRole material fails closed in `_authenticate`.
+    The one place a long-lived caller (the in-VM broker, Plan 012 WI-012-3) or a
+    read-path probe (`reachable`, `capabilities_self`, ``doctor --boundary``)
+    builds a Vault client, so every one keeps the two WI-016 invariants: the
+    client is constructed with ``token=""`` (never ``None`` -- hvac would
+    otherwise read ``$VAULT_TOKEN`` and ``~/.vault-token``) and declared but
+    incomplete AppRole material fails closed in `_authenticate`.
+
+    ``env_path`` pins an explicit access-plane ``.env`` (per-plane probing).
+    ``allow_token=False`` also refuses an explicit ``VAULT_TOKEN``: the broker
+    runs on the VM's AppRole or Kubernetes identity only (Plan 012 section 1,
+    "no ambient VAULT_TOKEN").
 
     Raises `RuntimeError` when a client cannot be built or authenticated (no
     `[cred]` extra, no `VAULT_ADDR`, no auth material); the message names
@@ -354,7 +363,7 @@ def authenticated_client(vault_env: str | os.PathLike[str] | None = None) -> obj
     # The address is checked before the extra: it is a property of the host's
     # configuration that no install fixes, so "no address" is reported the same
     # way whether or not hvac happens to be importable.
-    env = _vault_env(vault_env)
+    env = _vault_env(env_path)
     addr = env.get("VAULT_ADDR")
     if not addr:
         raise RuntimeError("VAULT_ADDR is not set")
@@ -362,17 +371,23 @@ def authenticated_client(vault_env: str | os.PathLike[str] | None = None) -> obj
         import hvac
     except ImportError as exc:
         raise RuntimeError(
-            "cred reachability needs the [cred] extra: "
-            "pip install 'agent-capability-broker[cred]'"
+            "Vault access needs the [cred] extra: pip install 'agent-capability-broker[cred]'"
         ) from exc
-
+    if not allow_token:
+        k8s = _K8S_TOKEN.is_file() and bool(env.get("VAULT_K8S_ROLE"))
+        if not k8s and not any(env.get(k) for k in _APPROLE_VARS):
+            raise RuntimeError(
+                "no AppRole or Kubernetes identity is configured, and VAULT_TOKEN is "
+                "not accepted here (the broker runs on the VM's own identity only)"
+            )
     # `token=""` and NOT the default `None`: with `None`, hvac calls
     # `utils.get_token_from_env()`, which reads `$VAULT_TOKEN` *and*
     # `~/.vault-token`. A stray developer token in the home directory would then
     # let this report a capability REACHABLE on a host that is supposed to be
     # AppRole-only -- the runtime half of the trap WI-015 closed in `onboard`.
-    client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN") or "")
-    _authenticate(client, env, source=_auth_source(env, vault_env))
+    token = (env.get("VAULT_TOKEN") or "") if allow_token else ""
+    client = hvac.Client(url=addr, token=token)
+    _authenticate(client, env, source=_auth_source(env, env_path))
     return client
 
 

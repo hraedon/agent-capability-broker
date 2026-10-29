@@ -74,6 +74,37 @@ def test_core_no_forbidden_relative_imports(mod: str) -> None:
         f"{mod} imports a forbidden optional-extra module at module level"
 
 
+# acb-broker (Plan 012 WI-012-3) is stdlib-only too. It needs a few more stdlib
+# modules than the CLI core (sockets, threads, logging); it may import the
+# stdlib-only core and its own sibling modules, and must reach `cred_vault` /
+# `hvac` only lazily (the Vault issuers import them inside function bodies).
+BROKER_DIR = SRC / "broker"
+BROKER_MODULES = sorted(p.name for p in BROKER_DIR.glob("*.py"))
+BROKER_STDLIB_OK = STDLIB_OK | {
+    "socket", "struct", "threading", "logging", "secrets", "tempfile", "ctypes", "types",
+}
+BROKER_INTERNAL = CORE_INTERNAL | {p.stem for p in BROKER_DIR.glob("*.py")}
+
+
+def test_broker_package_is_covered() -> None:
+    assert "server.py" in BROKER_MODULES and "issuers.py" in BROKER_MODULES
+
+
+@pytest.mark.parametrize("mod", BROKER_MODULES)
+def test_broker_is_stdlib_only(mod: str) -> None:
+    external = (
+        _imports(BROKER_DIR / mod) - BROKER_STDLIB_OK - {"agent_capability_broker"}
+        - BROKER_INTERNAL
+    )
+    assert not external, f"broker/{mod} imports non-stdlib/non-core packages: {external}"
+
+
+@pytest.mark.parametrize("mod", BROKER_MODULES)
+def test_broker_no_forbidden_module_level_imports(mod: str) -> None:
+    assert not (_imports(BROKER_DIR / mod) & FORBIDDEN_IN_CORE), \
+        f"broker/{mod} imports a forbidden optional-extra module at module level"
+
+
 def test_doctor_does_not_write_or_leak(tmp_path: Path) -> None:
     from agent_capability_broker.cli import main
 
