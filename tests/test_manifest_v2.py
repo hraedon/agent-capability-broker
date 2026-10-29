@@ -113,6 +113,12 @@ def test_example_boundary_table() -> None:
         ('assurance = "d1"\n', "assurance must be one of"),
         ('decision = "maybe"\n', "decision must be one of"),
         ("decision = true\n", "decision must be one of"),
+        # an H1 floor is only attainable on remote-op: helper/proxy/env cannot hide the value
+        ('assurance = "H1"\n', "unattainable on the 'env' rung"),
+        ('assurance = "H1+D1"\ndelivery = { rung = "helper" }\n', "unattainable on the 'helper'"),
+        ('assurance = "H1"\ndelivery = { rung = "proxy" }\n', "unattainable on the 'proxy'"),
+        ('assurance = "H1"\nissuer = { kind = "vault-pki" }\ndelivery = { rung = "proxy" }\n',
+         "only 'remote-op'"),
         # decision is remote-op only: absent delivery (env), and every in-VM rung, refuse it.
         ('decision = "auto"\n', "only valid when delivery.rung = 'remote-op'"),
         ('decision = "approve"\ndelivery = { rung = "helper" }\n', "only valid when"),
@@ -131,7 +137,9 @@ def test_v2_validation_errors(tmp_path: Path, body: str, match: str) -> None:
 
 @pytest.mark.parametrize("level", ASSURANCE_LEVELS)
 def test_every_assurance_level_is_accepted(tmp_path: Path, level: str) -> None:
-    assert _cap(f'assurance = "{level}"\n', tmp_path).declared_assurance == level
+    # H1 / H1+D1 are only attainable where the value never enters the VM.
+    delivery = 'delivery = { rung = "remote-op" }\n' if level.startswith("H") else ""
+    assert _cap(f'assurance = "{level}"\n{delivery}', tmp_path).declared_assurance == level
 
 
 @pytest.mark.parametrize("decision", ["auto", "approve", "deny"])

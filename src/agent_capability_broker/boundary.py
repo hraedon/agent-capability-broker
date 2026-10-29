@@ -5,7 +5,8 @@ administers anything that guards or issues secrets.** This module checks what
 can be checked from inside the VM without acting:
 
 * the kubeconfig's own authority (``kubectl auth can-i``, plus its file mode),
-* the VM's Vault identity (``sys/capabilities-self`` on the admin paths),
+* the VM's Vault identity (``sys/capabilities-self`` on the admin paths, and a
+  warning if it holds ``sys/leases/revoke`` or ``auth/token/revoke-accessor``),
 * the operator's declared admin SSH targets, which cannot be derived and are
   reported as "checked by hand".
 
@@ -41,6 +42,13 @@ _CHECK_STATUS = {"ok": "ok", "warn": "warn", "fail": "fail", "unknown": "warn"}
 
 # Admin paths on which the VM's Vault identity must hold only ``deny``.
 VAULT_ADMIN_PATHS = ("sys/policies/acl/x", "auth/x", "identity/x", "sys/mounts")
+
+# Broad revocation capabilities the VM must NOT hold (Plan 012 section 10): the
+# broker revokes with per-checkout child tokens (``auth/token/revoke-self``), so
+# it needs neither of these. Holding them lets a compromised VM revoke other
+# identities' leases / any token whose accessor it can learn. A warning, not a
+# failure: it widens blast radius for availability, it does not expose a secret.
+VAULT_BROAD_REVOKE_PATHS = ("sys/leases/revoke/x", "auth/token/revoke-accessor")
 
 # The environment kubectl is given: enough to find its kubeconfig and the binary,
 # nothing else (no VAULT_*, no tokens, no proxies inherited by accident).
@@ -235,6 +243,35 @@ def _vault_identity_check(vault_client: object | None) -> BoundaryCheck:
     )
 
 
+def _vault_revoke_scope_check(vault_client: object | None) -> BoundaryCheck:
+    name = "boundary.vault-revoke-scope"
+    try:
+        from . import cred_vault  # lazy: the optional [cred] extra, never core
+
+        caps = cred_vault.capabilities_self(list(VAULT_BROAD_REVOKE_PATHS), client=vault_client)
+    except RuntimeError as exc:
+        return BoundaryCheck(name, "unknown", str(exc))
+    except Exception as exc:  # defensive: a probe must never crash doctor
+        return BoundaryCheck(name, "unknown", f"Vault probe failed ({type(exc).__name__})")
+    offenders = {
+        path: sorted(c for c in granted if c != "deny")
+        for path, granted in caps.items()
+        if any(c != "deny" for c in granted)
+    }
+    if offenders:
+        listing = "; ".join(f"{p} [{', '.join(c)}]" for p, c in offenders.items())
+        return BoundaryCheck(
+            name,
+            "warn",
+            f"the VM's Vault identity can revoke beyond its own tokens: {listing}; the broker "
+            f"revokes with per-checkout child tokens (auth/token/revoke-self) and needs "
+            f"neither sys/leases/revoke nor auth/token/revoke-accessor",
+        )
+    return BoundaryCheck(
+        name, "ok", "no sys/leases/revoke or auth/token/revoke-accessor (token-bound revocation)"
+    )
+
+
 def run_boundary_checks(
     cfg: BoundaryConfig,
     *,
@@ -252,6 +289,7 @@ def run_boundary_checks(
     env = os.environ if environ is None else environ
     checks = _kubectl_checks(cfg, env, runner or _run)
     checks.append(_vault_identity_check(vault_client))
+    checks.append(_vault_revoke_scope_check(vault_client))
     for host in cfg.ssh_admin_targets:
         checks.append(
             BoundaryCheck(

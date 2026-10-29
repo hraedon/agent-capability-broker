@@ -218,6 +218,7 @@ class Broker:
                 issuer_kind=cap.issuer.kind,
                 assurance=cap.effective_assurance,
                 revocation_handle=issued.revocation_handle,
+                accessor=issued.accessor,
                 anchor_pid=attr.anchor_pid,
                 anchor_start=attr.anchor_start,
                 value=dict(issued.value_fields),

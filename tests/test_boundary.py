@@ -23,6 +23,7 @@ import pytest
 from agent_capability_broker import boundary as boundary_mod
 from agent_capability_broker.boundary import (
     VAULT_ADMIN_PATHS,
+    VAULT_BROAD_REVOKE_PATHS,
     BoundaryCheck,
     kubeconfig_files,
     run_boundary_checks,
@@ -350,7 +351,7 @@ def _all(caps: list[str]) -> dict[str, list[str]]:
 def test_vault_all_deny_is_ok_and_asks_the_four_admin_paths() -> None:
     check, client = _vault(_all(["deny"]))
     assert check.verdict == "ok"
-    assert client.sys.asked == [list(VAULT_ADMIN_PATHS)]
+    assert client.sys.asked == [list(VAULT_ADMIN_PATHS), list(VAULT_BROAD_REVOKE_PATHS)]
     assert set(VAULT_ADMIN_PATHS) == {"sys/policies/acl/x", "auth/x", "identity/x", "sys/mounts"}
 
 
@@ -627,3 +628,77 @@ def test_cli_bad_boundary_table_is_the_manifest_error_envelope(
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
     payload, rc = _doctor(manifest, "--boundary")
     assert rc == 1 and payload["error"]["code"] == "MANIFEST_ERROR"  # type: ignore[index]
+
+
+# --- token-bound revocation: the VM must not hold broad revoke capabilities ----------
+# Plan 012 section 10 (c): the broker revokes with per-checkout child tokens
+# (auth/token/revoke-self), so sys/leases/revoke and auth/token/revoke-accessor are
+# warned about, not required.
+
+
+class _PerPathSys:
+    """Answers each ``capabilities-self`` call by the paths it asks about."""
+
+    def __init__(self, revoke_reply: object) -> None:
+        self.revoke_reply = revoke_reply
+
+    def get_capabilities(self, paths: list[str]) -> object:
+        if paths == list(VAULT_BROAD_REVOKE_PATHS):
+            if isinstance(self.revoke_reply, Exception):
+                raise self.revoke_reply
+            return self.revoke_reply
+        return _all(["deny"])
+
+
+class _PerPathClient:
+    def __init__(self, revoke_reply: object) -> None:
+        self.sys = _PerPathSys(revoke_reply)
+
+
+def _revoke_scope(reply: object) -> BoundaryCheck:
+    checks = _by_name(
+        run_boundary_checks(
+            BoundaryConfig(),
+            environ={"PATH": "", "HOME": "/nonexistent"},
+            vault_client=_PerPathClient(reply),
+        )
+    )
+    assert checks["boundary.vault-identity"].verdict == "ok"  # independent of the new probe
+    return checks["boundary.vault-revoke-scope"]
+
+
+def _revoke_paths(caps: list[str]) -> dict[str, list[str]]:
+    return {p: list(caps) for p in VAULT_BROAD_REVOKE_PATHS}
+
+
+def test_broad_revoke_paths_are_the_two_named_in_the_plan() -> None:
+    assert set(VAULT_BROAD_REVOKE_PATHS) == {"sys/leases/revoke/x", "auth/token/revoke-accessor"}
+
+
+def test_revoke_scope_all_deny_is_ok() -> None:
+    check = _revoke_scope(_revoke_paths(["deny"]))
+    assert check.verdict == "ok"
+    assert check.as_check()["status"] == "ok"
+
+
+@pytest.mark.parametrize("path", sorted(VAULT_BROAD_REVOKE_PATHS))
+@pytest.mark.parametrize("granted", [["update"], ["create", "update"], ["sudo"], ["root"]])
+def test_revoke_scope_warns_when_a_broad_revoke_is_granted(path: str, granted: list[str]) -> None:
+    check = _revoke_scope(_revoke_paths(["deny"]) | {path: granted})
+    assert check.verdict == "warn"  # a warning, never a failure
+    assert check.as_check()["status"] == "warn"
+    assert path in check.detail
+    assert "revoke-self" in check.detail
+    other = next(p for p in VAULT_BROAD_REVOKE_PATHS if p != path)
+    assert other not in check.detail.split("; the broker")[0]  # only the offender is listed
+
+
+def test_revoke_scope_reply_missing_a_path_is_unknown() -> None:
+    check = _revoke_scope({"sys/leases/revoke/x": ["deny"]})
+    assert check.verdict == "unknown"
+
+
+def test_revoke_scope_transport_error_is_unknown_and_does_not_leak() -> None:
+    check = _revoke_scope(ConnectionError(f"https://vault.example.invalid failed {CANARY}"))
+    assert check.verdict == "unknown"
+    assert CANARY not in check.detail and "vault.example.invalid" not in check.detail

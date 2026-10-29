@@ -10,12 +10,18 @@ from __future__ import annotations
 import io
 import json
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from agent_capability_broker.cli import _assurance_checks, _classify_health, main
-from agent_capability_broker.model import parse_manifest
+from agent_capability_broker.model import (
+    ISSUING_KINDS,
+    Capability,
+    derive_assurance,
+    parse_manifest,
+)
 
 _VOCAB = {"ok", "warn", "fail", "skip"}
 
@@ -33,6 +39,11 @@ def _cred(name: str, body: str = "") -> str:
 def _check(tmp_path: Path, entry: str) -> dict[str, object]:
     (check,) = _assurance_checks(parse_manifest(_manifest(tmp_path, entry)))
     return check
+
+
+def _parsed(tmp_path: Path, body: str) -> Capability:
+    (cap,) = parse_manifest(_manifest(tmp_path, _cred("a", body)))
+    return cap
 
 
 def test_v1_cred_entry_warns_it_is_d0_with_no_floor(tmp_path: Path) -> None:
@@ -59,7 +70,8 @@ def test_static_issuer_with_d1_floor_fails(tmp_path: Path) -> None:
 
 
 def test_env_rung_with_floor_above_d0_fails(tmp_path: Path) -> None:
-    assert _check(tmp_path, _cred("a", 'assurance = "H1"'))["status"] == "fail"
+    # D1 on the env rung with no issuer is below the floor (parse accepts it).
+    assert _check(tmp_path, _cred("a", 'assurance = "D1"'))["status"] == "fail"
 
 
 def test_issuing_helper_meets_d1(tmp_path: Path) -> None:
@@ -69,8 +81,13 @@ def test_issuing_helper_meets_d1(tmp_path: Path) -> None:
 
 
 def test_d1_does_not_meet_an_h1_floor(tmp_path: Path) -> None:
-    body = 'issuer = { kind = "vault-pki" }\ndelivery = { rung = "proxy" }\nassurance = "H1"'
-    assert _check(tmp_path, _cred("a", body))["status"] == "fail"
+    # Such a manifest is refused at parse time; doctor must still fail a Capability
+    # that reaches it by another route.
+    body = 'issuer = { kind = "vault-pki" }\ndelivery = { rung = "proxy" }'
+    base = _parsed(tmp_path, body)
+    cap = replace(base, declared_assurance="H1")
+    (check,) = _assurance_checks([cap])
+    assert check["status"] == "fail"
 
 
 def test_remote_op_meets_h1_but_not_h1_d1_without_an_issuing_issuer(tmp_path: Path) -> None:
@@ -195,3 +212,96 @@ def test_doctor_reports_a_v2_manifest_error_as_the_manifest_envelope(
     payload = json.loads(buf.getvalue())
     assert rc == 1
     assert payload["ok"] is False and payload["error"]["code"] == "MANIFEST_ERROR"
+
+
+# --- helper / proxy are never H1 (Plan 012 section 10 (a)) -------------------------
+# Root in the VM is accepted: a native helper hands the token to any VM process that
+# asks, and an in-VM proxy holds it in VM memory. Only remote-op can be hidden.
+
+
+def _doctor_entry_json(tmp_path: Path, entry: str) -> tuple[int, dict[str, object]]:
+    manifest = _manifest(tmp_path, entry)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = main(["doctor", "-m", str(manifest), "--json"])
+    return rc, json.loads(buf.getvalue())
+
+
+@pytest.mark.parametrize("rung", ["helper", "proxy", "env"])
+@pytest.mark.parametrize("floor", ["H1", "H1+D1"])
+@pytest.mark.parametrize(
+    "issuer", [None, "vault-kv", "vault-pki", "vault-k8s-token", "remote-mint", "made-up"]
+)
+def test_no_in_vm_rung_derives_h1_for_any_issuer(rung: str, floor: str, issuer: str | None) -> None:
+    cap = Capability(
+        id="cred:a", provider="cred", harnesses=("claude",),
+        issuer=None if issuer is None else {"kind": issuer},
+        delivery={"rung": rung}, declared_assurance=floor,
+    )
+    effective, _ = derive_assurance(cap)
+    assert effective in ("D0", "D1")  # at most D1; never hidden
+    assert effective == ("D1" if issuer in ISSUING_KINDS else "D0")
+
+
+@pytest.mark.parametrize("rung", ["helper", "proxy", "env"])
+@pytest.mark.parametrize("floor", ["H1", "H1+D1"])
+def test_doctor_fails_an_h1_floor_on_an_in_vm_rung(rung: str, floor: str) -> None:
+    # Parsing refuses such a manifest, so build the Capability directly: doctor's
+    # check must hold on its own, not only because parse got there first.
+    cap = Capability(
+        id="cred:a", provider="cred", harnesses=("claude",),
+        issuer={"kind": "vault-pki"}, delivery={"rung": rung}, declared_assurance=floor,
+    )
+    (check,) = _assurance_checks([cap])
+    assert check["status"] == "fail"
+    assert f"declared floor {floor} is unattainable on the {rung!r} rung" in str(check["detail"])
+    assert "remote-op" in str(check["detail"])
+    assert check["effective"] == "D1" and check["declared"] == floor
+
+
+def test_remote_op_h1_floor_is_not_flagged_as_unattainable() -> None:
+    cap = Capability(
+        id="cred:a", provider="cred", harnesses=("claude",),
+        delivery={"rung": "remote-op"}, declared_assurance="H1",
+    )
+    (check,) = _assurance_checks([cap])
+    assert check["status"] == "ok"
+    assert "unattainable" not in str(check["detail"])
+
+
+@pytest.mark.parametrize("rung", ["helper", "proxy", "env"])
+def test_manifest_with_an_h1_floor_on_an_in_vm_rung_is_a_manifest_error(
+    tmp_path: Path, rung: str
+) -> None:
+    body = f'delivery = {{ rung = "{rung}" }}\nassurance = "H1"'
+    rc, payload = _doctor_entry_json(tmp_path, _cred("a", body))
+    assert rc == 1
+    assert payload["error"]["code"] == "MANIFEST_ERROR"  # type: ignore[index]
+    assert "unattainable" in payload["error"]["message"]  # type: ignore[index]
+    assert "cred:a" in payload["error"]["message"]  # type: ignore[index]
+
+
+@pytest.mark.parametrize("rung", ["helper", "proxy"])
+@pytest.mark.parametrize("floor_line", ["", 'assurance = "D0"\n'])
+def test_static_issuer_on_helper_or_proxy_is_d0_with_a_warn_suggesting_remote_op(
+    tmp_path: Path, rung: str, floor_line: str
+) -> None:
+    body = f'issuer = {{ kind = "vault-kv" }}\ndelivery = {{ rung = "{rung}" }}\n{floor_line}'
+    check = _check(tmp_path, _cred("a", body))
+    assert check["effective"] == "D0"
+    assert check["status"] == "warn"  # even with an acknowledged D0 floor
+    assert "remote-op" in str(check["detail"])
+    assert f"{rung} rung" in str(check["detail"])
+
+
+def test_unlisted_issuer_kind_on_a_helper_is_d0_with_the_same_warn(tmp_path: Path) -> None:
+    body = 'issuer = { kind = "gitea-token" }\ndelivery = { rung = "helper", tool = "git" }'
+    check = _check(tmp_path, _cred("a", body))
+    assert check["effective"] == "D0" and check["status"] == "warn"
+    assert "remote-op" in str(check["detail"])
+
+
+def test_a_warn_for_a_static_helper_degrades_but_does_not_fail_doctor(tmp_path: Path) -> None:
+    body = 'issuer = { kind = "vault-kv" }\ndelivery = { rung = "helper", tool = "git" }'
+    checks = _assurance_checks(parse_manifest(_manifest(tmp_path, _cred("a", body))))
+    assert _classify_health(checks) == (True, True)  # ok, degraded

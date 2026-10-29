@@ -20,7 +20,7 @@ from _childpy import CHILD_PY, EXAMPLE_TOOL, trusted_toml
 from agent_capability_broker import cred_vault, providers
 from agent_capability_broker.adapters import OpencodeAdapter
 from agent_capability_broker.cli import main
-from agent_capability_broker.model import Capability, Status, parse_manifest
+from agent_capability_broker.model import Capability, ManifestError, Status, parse_manifest
 from agent_capability_broker.providers import (
     CredProvider,
     _render_cred_shim,
@@ -402,7 +402,6 @@ def _doctor_checks_for(manifest: Path, monkeypatch: pytest.MonkeyPatch, tmp_path
     ("body", "message"),
     [
         ("", "trusted_argv is required"),
-        (trusted_toml([_abs("/bin/sh"), "-c", "true"]), "shell or interpreter"),
         (trusted_toml(["relative-tool"]), "absolute"),
     ],
 )
@@ -423,6 +422,16 @@ def test_doctor_fails_a_cred_with_a_bad_trusted_argv(
     assert payload["ok"] is False
     assert payload["_rc"] == 1
     assert no_secret_touched == []  # and Vault was never probed
+
+
+def test_interpreter_first_trusted_argv_stops_the_manifest_parse(
+    no_secret_touched: list[str], tmp_path: Path
+) -> None:
+    manifest = _manifest(tmp_path, trusted_toml(["/bin/sh", "-c", "true"]))
+
+    with pytest.raises(ManifestError, match="shell or interpreter"):
+        parse_manifest(manifest)
+    assert no_secret_touched == []
 
 
 def test_doctor_passes_a_cred_with_a_valid_trusted_argv(

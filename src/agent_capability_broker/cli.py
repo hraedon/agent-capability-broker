@@ -30,6 +30,7 @@ from .model import (
     Verdict,
     assurance_rank,
     derive_assurance,
+    hidden_floor_problem,
     parse_boundary,
     parse_manifest,
     resolve_manifest,
@@ -201,10 +202,12 @@ def _assurance_checks(caps: list[Capability]) -> list[dict[str, object]]:
     """Per-capability assurance report (Plan 012 §5): effective level vs declared floor.
 
     The effective level is derived deterministically from the manifest entry
-    (`derive_assurance`). Below the declared floor is a hard ``fail``; a ``D0``
-    capability with no declared floor is a ``warn`` -- reported honestly, never
-    passed. Capabilities that hold no credential (a v1 ``e2e`` entry) are not
-    judged unless they declare a v2 key.
+    (`derive_assurance`). Below the declared floor is a hard ``fail``, and so is
+    an ``H1`` / ``H1+D1`` floor on a rung that cannot hide the value (only
+    ``remote-op`` can: root in the VM is accepted). A ``D0`` capability with no
+    declared floor, or a ``D0`` one delivered by the ``helper`` / ``proxy`` rung,
+    is a ``warn`` -- reported honestly, never passed. Capabilities that hold no
+    credential (a v1 ``e2e`` entry) are not judged unless they declare a v2 key.
     """
     checks: list[dict[str, object]] = []
     for cap in caps:
@@ -212,9 +215,26 @@ def _assurance_checks(caps: list[Capability]) -> list[dict[str, object]]:
             continue
         effective, reason = derive_assurance(cap)
         floor = cap.declared_assurance
-        if floor is not None and assurance_rank(effective) < assurance_rank(floor):
+        impossible = hidden_floor_problem(cap.rung, floor)
+        if impossible is not None:
+            # A helper/proxy/env capability can never be H1, whatever the issuer:
+            # the value enters the VM. Reported as its own failure so the fix
+            # (move to remote-op, or lower the floor) is unmistakable.
+            status = "fail"
+            detail = impossible
+        elif floor is not None and assurance_rank(effective) < assurance_rank(floor):
             status = "fail"
             detail = f"effective {effective} is below the declared floor {floor} ({reason})"
+        elif effective == "D0" and cap.rung in ("helper", "proxy"):
+            # Honest even when the D0 floor is acknowledged: a native helper hands
+            # the token to any VM process that asks, and a proxy holds it in VM
+            # memory, so a static source here is a standing secret in the VM.
+            status = "warn"
+            detail = (
+                f"D0: a static source delivered by the {cap.rung} rung is a standing "
+                f"secret in the VM; use an issuing issuer (D1) or move it behind "
+                f"'remote-op' so the value never enters the VM ({reason})"
+            )
         elif floor is None and effective == "D0":
             status = "warn"
             detail = f"D0: a standing secret in the VM, with no assurance floor declared ({reason})"

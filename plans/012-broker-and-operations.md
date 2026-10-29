@@ -112,18 +112,25 @@ with `assurance = "D0"` unless its source is an issuing engine.
 Rung `env` keeps today's semantics with one change: **`trusted_argv` is
 required for every `cred` capability** (not only `source = "suite"`), and the
 first element may not be a shell or interpreter (`sh`, `bash`, `zsh`, `dash`,
-`pwsh`, `powershell`, `cmd`, `python*`, `node`, `perl`, `ruby`, `env`).
-`acb exec cred:x -- env` must fail with a manifest/exec error before any
-secret is resolved.
+`pwsh`, `powershell`, `cmd`, `python*`, `node`, `perl`, `ruby`, `env`; list
+expanded in §10 (b)). `acb exec cred:x -- env` must fail with a manifest/exec
+error before any secret is resolved.
 
 ## 6. Vault configuration (summary)
 
 - VM identity: one AppRole now (`secret_id_num_uses` bounded, CIDR-bound,
   rotated by the operator from the workstation); cert or TPM-backed later.
-- VM policy: `read` on declared `creds/`/`issue/`/`sign/` paths and declared
-  legacy KV paths only. Nothing under `sys/`, `auth/`, `identity/`, no policy
-  writes. `doctor --boundary` checks this with a capabilities-self call.
-- Tokens the broker hands out are service tokens with a TTL ≤ 15 min.
+- VM policy: `read` (`update` for dynamic `creds/`) on declared
+  `creds/`/`issue/`/`sign/` paths and declared legacy KV paths, plus `update` on
+  `auth/token/create` (per-checkout child tokens cannot exceed the parent's
+  policies). Revocation relies on the `default` policy's `auth/token/revoke-self`.
+  Nothing under `sys/` (in particular no `sys/leases`), no `auth/token/revoke-accessor`,
+  nothing else under `auth/` or `identity/`, no policy writes. `doctor --boundary`
+  checks the admin paths with a capabilities-self call and warns on the broad
+  revoke paths (§10 (c)).
+- Dynamic credentials are read with a per-checkout child token (service type,
+  TTL ≤ 15 min, bounded `num_uses`, not renewable) and revoked by that token's
+  `revoke-self`; the broker's own token never reads them.
 - Provisioning (`acb onboard`, policy writes) runs from the workstation with
   an operator OIDC login, never a root token on disk.
 
@@ -163,3 +170,56 @@ credential or an approval key.
 
 WI-012-3 reads the v2 keys through its own small parser until WI-012-2 lands;
 a follow-up item switches it to the shared model.
+
+## 10. Review amendments (2026-10-28)
+
+From an external review (Argon) of this plan. Where these disagree with
+§§1-9, this section wins.
+
+**(a) Assurance: helper and proxy are never `H1`.** Root in the VM is accepted,
+so a native credential helper hands the token to any VM process that asks and
+an in-VM egress proxy holds it in VM memory. Only `remote-op` (the value never
+enters the VM) can be `H1`. The derivation already gives helper/proxy/env at
+most `D1` (`D0` for a non-issuing issuer such as `vault-kv`). Now enforced:
+declaring `H1` or `H1+D1` on any other rung is a `ManifestError` and a failing
+`doctor` check; a `helper`/`proxy` capability that is `D0` is a `warn` that
+suggests `remote-op`.
+
+**(b) Launcher denylist.** The §5 list was incomplete. It now also covers `ksh`,
+`fish`, `csh`, `tcsh`, `py`, `wscript`, `cscript`, `mshta`, `rundll32`,
+`regsvr32`, `busybox`, `toybox`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`,
+`sudo`, `doas`, `su`, `xargs`, `find`, `awk`/`gawk`/`mawk`, `sed`, `uv`, `uvx`,
+`npx`, `bunx`, `bun`, `deno`, `php`, `lua`, `tclsh`, `wish`, `expect`,
+`osascript`, `ssh`, `script`, with version suffixes (`python3.13`, `lua5.4`,
+`php8.3`, `ruby3.2`, `perl5.38`, `node22`) and `.exe .com .bat .cmd .ps1`
+stripped, case-insensitively, on the basename. One list (`launchers.py`),
+enforced at manifest parse, in `doctor` and at exec. It is a lint guard against
+operator mistakes, not a sandbox: `trusted_argv` is an exact full-argv match
+from an operator-reviewed manifest.
+
+**(c) Revocation without `sys/leases/revoke`.** Revoking by lease id needs a
+broad lease-revoke grant (it could revoke other identities' leases). Instead,
+each checkout from a dynamic engine gets a child token of the broker's own
+(`auth/token/create`: non-orphan, `policies` a subset of the parent's, `ttl`
+the checkout TTL capped at 15 min, bounded `num_uses`, not renewable, service
+type). The creds are read with the child token, which lives only in broker
+memory; revoke is `auth/token/revoke-self` called with it, and Vault revokes
+every lease it created. The VM policy needs `update` on `auth/token/create`
+and the `default` policy's `revoke-self`; **nothing** under `sys/leases` and no
+`auth/token/revoke-accessor` (too broad). After a broker restart the token is
+gone and the lease dies with the token TTL (≤ 15 min); only the token
+accessor and expiry are persisted, for `checkouts` display. Static KV reads
+have no lease and are unchanged. `doctor --boundary` warns if either broad
+revoke path is granted.
+
+**(d) P4 note: peer credentials.** Broker peer-credential extraction goes behind
+a small platform helper: Linux `SO_PEERCRED`, macOS `LOCAL_PEERCRED` /
+`getpeereid`, Windows `SIO_AF_UNIX_GETPEERPID` or a 0700 owner-ACL directory.
+Not implemented now.
+
+**(e) `acb-ops` WebAuthn verification (§4, made precise).** The challenge is
+`base64url(SHA-256(canonical grant JSON))`. `acb-ops` verifies: `rpIdHash`;
+the origin against an allowlist (the console origin); the `UP` and `UV` flags;
+the signature over `authenticatorData || SHA-256(clientDataJSON)`; and
+`signCount` monotonicity. `acb-ops` is not part of the stdlib-only core and
+takes a cryptography dependency via an `[ops]` optional extra.
