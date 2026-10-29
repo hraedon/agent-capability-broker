@@ -339,6 +339,41 @@ def _split_mount(path: str) -> tuple[str, str]:
     return head, tail
 
 
+def authenticated_client(
+    env_path: str | os.PathLike[str] | None = None, *, allow_token: bool = True
+) -> object:
+    """An hvac client logged in by the WI-016 rules (k8s -> AppRole -> token).
+
+    For long-lived callers that hold one identity across many requests — the
+    in-VM broker (Plan 012 WI-012-3). Same invariants as `resolve`: the client
+    is built with ``token=""`` (never hvac's ambient ``None``) and declared but
+    incomplete AppRole material fails closed. ``allow_token=False`` also refuses
+    an explicit ``VAULT_TOKEN``: the broker runs on the VM's AppRole or
+    Kubernetes identity only (Plan 012 §1, "no ambient VAULT_TOKEN").
+    """
+    try:
+        import hvac
+    except ImportError as exc:
+        raise RuntimeError(
+            "Vault issuers need the [cred] extra: pip install 'agent-capability-broker[cred]'"
+        ) from exc
+    env = _vault_env(env_path)
+    addr = env.get("VAULT_ADDR")
+    if not addr:
+        raise RuntimeError("VAULT_ADDR is not set")
+    if not allow_token:
+        k8s = _K8S_TOKEN.is_file() and bool(env.get("VAULT_K8S_ROLE"))
+        if not k8s and not any(env.get(k) for k in _APPROLE_VARS):
+            raise RuntimeError(
+                "no AppRole or Kubernetes identity is configured, and VAULT_TOKEN is "
+                "not accepted here (the broker runs on the VM's own identity only)"
+            )
+    token = (env.get("VAULT_TOKEN") or "") if allow_token else ""
+    client = hvac.Client(url=addr, token=token)
+    _authenticate(client, env, source=_auth_source(env, env_path))
+    return client
+
+
 def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = None) -> bool:
     """Read-only broker reachability: authenticate, then a **token self-lookup**
     only — never reads the capability's secret (that would be a *use*, spine §4).
