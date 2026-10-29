@@ -18,12 +18,13 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from . import provenance
 from .adapters import (
@@ -42,7 +43,8 @@ from .secret_sources import (
     resolve_suite,
     source_kind,
     suite_spec,
-    validate_suite_command,
+    validate_cred_trusted_argv,
+    validate_exec_command,
 )
 
 _BROWSER_DIR_PREFIXES = ("chromium", "chromium_headless_shell", "firefox", "webkit")
@@ -108,7 +110,7 @@ _SUITE_CHILD_ENV_ALLOWLIST = frozenset(
 _TREE_TERMINATION_GRACE_SECONDS = 2.0
 
 
-def _child_startupinfo() -> subprocess.STARTUPINFO | None:
+def _child_startupinfo() -> Any:
     """Windows STARTUPINFO that stops a brokered child flashing a console window.
 
     When a console-less (GUI) parent launches a console-subsystem child, Windows
@@ -124,7 +126,7 @@ def _child_startupinfo() -> subprocess.STARTUPINFO | None:
     Returns ``None`` off Windows (``startupinfo`` is a no-op there), which is
     identical to omitting the argument for ``subprocess``.
     """
-    if os.name != "nt":
+    if sys.platform != "win32":  # also lets mypy skip the Windows-only attributes
         return None
     startup = subprocess.STARTUPINFO()
     startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
@@ -840,7 +842,10 @@ def exec_composed(caps: list[Capability], argv: list[str]) -> int:
     declared names and emits a single receipt covering all of them — replacing
     nested `acb exec` shells that re-export values by hand. Only non-suite
     cred capabilities compose; the suite source keeps its dedicated
-    exact-command trust model.
+    resolution model. Every composed capability is still bound to its exact
+    manifest `trusted_argv`: the one command must equal each capability's
+    declaration, so a child is only ever handed values by capabilities that
+    qualified it. All checks run before any value is resolved.
     """
     if not argv:
         raise ValueError("exec requires a command after '--'")
@@ -857,6 +862,7 @@ def exec_composed(caps: list[Capability], argv: list[str]) -> int:
         if cap.id in seen:
             raise RuntimeError(f"{cap.id}: capability repeated in composed checkout")
         seen.add(cap.id)
+        validate_exec_command(cap, argv)
     provider = CredProvider()
     return _exec_checkout(caps, argv, provider._resolve)
 
@@ -975,6 +981,7 @@ def _run_contained(
             argv,
             env=env,
             start_new_session=True,
+            startupinfo=_child_startupinfo(),
             close_fds=True,
         )
     try:
@@ -1051,6 +1058,17 @@ def vault_env_path(cap: Capability, adapter: HarnessAdapter) -> Path:
 _vault_env_path = vault_env_path
 
 
+def _trusted_argv_problem(cap: Capability) -> str | None:
+    """Why this cred capability can never exec, or None when its
+    ``trusted_argv`` (and source) declaration is sound. Pure; reads no value."""
+    try:
+        source_kind(cap)
+        validate_cred_trusted_argv(cap)
+    except SecretSourceConfigError as exc:
+        return str(exc)
+    return None
+
+
 def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path) -> str:
     """Markdown for a cred discovery shim. Carries **no secret** — only the
     capability id and the inject-don't-surface invocation pattern. Frontmatter
@@ -1081,12 +1099,12 @@ def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path)
         # spaces and backslashes, and an unquoted `VAR=C:\...` breaks the
         # POSIX assignment too. Bash preserves backslashes inside double
         # quotes (they are only special before $ ` " \ and newline).
-        unix_command = f'ACB_VAULT_ENV="{ve}" acb exec {cap.id} -- <command> [args...]'
+        unix_command = f'ACB_VAULT_ENV="{ve}" acb exec {cap.id} -- <exact options.trusted_argv>'
         powershell_command = (
-            f'$env:ACB_VAULT_ENV="{ve}"; acb exec {cap.id} -- <command> [args...]'
+            f'$env:ACB_VAULT_ENV="{ve}"; acb exec {cap.id} -- <exact options.trusted_argv>'
         )
         cmd_command = (
-            f'set "ACB_VAULT_ENV={ve}"&& acb exec {cap.id} -- <command> [args...]'
+            f'set "ACB_VAULT_ENV={ve}"&& acb exec {cap.id} -- <exact options.trusted_argv>'
         )
         source_note = (
             "`ACB_VAULT_ENV` points acb at this harness's Vault AppRole "
@@ -1096,9 +1114,12 @@ def _render_cred_shim(cap: Capability, harness: str, shim: str, vault_env: Path)
 
 `{cap.id}` is brokered by **agent-capability-broker**; it is not stored in this
 harness. To run a tool with it, shell out to `acb exec` — the credential is
-injected into the child process's environment. ACB does not print or return it,
-but the child inherits stdout/stderr and must be the exact manifest-qualified
-command; do not invoke a shell, interpreter, or unreviewed wrapper.
+injected into the child process's environment. ACB does not print or return it.
+`acb exec` runs only the exact command the manifest declares as
+`options.trusted_argv` for this capability and refuses anything else (including
+any shell or interpreter) before the credential is resolved. The child inherits
+stdout/stderr and is part of the trust boundary, so do not substitute a shell,
+interpreter, or unreviewed wrapper.
 
 **Linux / macOS:**
 
@@ -1155,6 +1176,10 @@ class CredProvider:
             source = source_kind(cap)
         except SecretSourceConfigError as exc:
             return Status.PRESENT_BROKEN, str(exc)
+        try:
+            validate_cred_trusted_argv(cap)
+        except SecretSourceConfigError as exc:
+            return Status.PRESENT_BROKEN, str(exc)
         if source is SecretSourceKind.ENV:
             var = cap.options.get("from_env")
             if isinstance(var, str) and var in os.environ:
@@ -1184,6 +1209,9 @@ class CredProvider:
 
     def inspect(self, cap: Capability, harness: str, adapter: HarnessAdapter) -> Verdict:
         shim = _cred_shim_name(cap)
+        problem = _trusted_argv_problem(cap)
+        if problem is not None:
+            return Verdict(cap.id, harness, Status.PRESENT_BROKEN, problem)
         if shim not in adapter.command_shims():
             return Verdict(
                 cap.id, harness, Status.ABSENT,
@@ -1197,6 +1225,12 @@ class CredProvider:
         self, cap: Capability, harness: str, adapter: HarnessAdapter
     ) -> list[Action]:
         shim = _cred_shim_name(cap)
+        problem = _trusted_argv_problem(cap)
+        if problem is not None:
+            return [Action(
+                cap.id, harness, "manual", shim,
+                f"manifest error for {cap.id}: {problem} — fix the manifest, not a shim",
+            )]
         if shim not in adapter.command_shims():
             content = _render_cred_shim(cap, harness, shim, _vault_env_path(cap, adapter))
             return [Action(
@@ -1269,6 +1303,10 @@ class CredProvider:
             raise ValueError("exec requires a command after '--'")
 
         source = source_kind(cap)
+        # Every cred source runs only its exact manifest-qualified command
+        # (Plan 012 section 5). Checked before any value is resolved, so a
+        # refused command never reaches Vault, the environment, or the suite.
+        validate_exec_command(cap, argv)
         if source is not SecretSourceKind.SUITE:
             if _declares_naming(cap):
                 # A declared naming contract (inject/env_prefix, WI-010) opts
@@ -1369,9 +1407,8 @@ class CredProvider:
                 raise RuntimeError(f"{cap.id}: checkout completed without a child result")
             return legacy_result.returncode
 
-        # Suite command, manifest, collision, and receipt-name validation all
-        # happen before a value is resolved.
-        validate_suite_command(cap, argv)
+        # Suite manifest, collision, and receipt-name validation all happen
+        # before a value is resolved (the exact command was checked above).
         taskkill_path = _windows_containment_preflight() if os.name == "nt" else None
         suite = suite_spec(cap, require_available=False)
         plan = _injection_plan(cap, list(suite.refs), mapping=suite.inject)

@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from _childpy import CHILD_PY
 
 from agent_capability_broker import providers, secret_sources
 from agent_capability_broker.model import Capability, Status
@@ -65,7 +66,7 @@ def _cap(**overrides: object) -> Capability:
             "password": "vault:kv/example/lab/password",
         },
         "inject": {"username": "LAB_USERNAME", "password": "LAB_PASSWORD"},
-        "trusted_argv": [sys.executable, "-c", "pass"],
+        "trusted_argv": [CHILD_PY, "-c", "pass"],
     }
     options.update(overrides)
     return Capability("cred:lab-control", "cred", ("opencode",), options)
@@ -103,7 +104,7 @@ def test_suite_exec_injects_multiple_fields_and_leaks_no_canary(
         "[os.environ['LAB_USERNAME'],os.environ['LAB_PASSWORD']]))"
     )
 
-    argv = [sys.executable, "-c", code]
+    argv = [CHILD_PY, "-c", code]
     assert CredProvider().exec(_cap(trusted_argv=argv), argv) == 0
     assert json.loads(out.read_text()) == [USER_CANARY, PASS_CANARY]
     captured = capsys.readouterr()
@@ -127,7 +128,7 @@ def test_suite_child_failure_returns_code_and_provenance_remains_value_free(
     _install_fake(monkeypatch, fake)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
 
-    argv = [sys.executable, "-c", "raise SystemExit(23)"]
+    argv = [CHILD_PY, "-c", "raise SystemExit(23)"]
     rc = CredProvider().exec(_cap(trusted_argv=argv), argv)
 
     assert rc == 23
@@ -144,7 +145,7 @@ def test_suite_collision_refuses_before_resolution(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("LAB_PASSWORD", "pre-existing")
 
     with pytest.raises(SecretSourceConfigError, match="already exists"):
-        CredProvider().exec(_cap(), [sys.executable, "-c", "pass"])
+        CredProvider().exec(_cap(), [CHILD_PY, "-c", "pass"])
     assert fake.resolve_calls == []
 
 
@@ -180,7 +181,7 @@ def test_suite_refuses_unknown_and_duplicate_injection_fields(
     with pytest.raises(SecretSourceConfigError, match="duplicate inject"):
         CredProvider().exec(
             _cap(inject={"username": "LAB_CRED", "password": "LAB_CRED"}),
-            [sys.executable, "-c", "pass"],
+            [CHILD_PY, "-c", "pass"],
         )
     assert fake.resolve_calls == []
 
@@ -242,7 +243,7 @@ def test_suite_resolution_failure_redacts_ref_backend_error_and_canary(
     cap = _cap(refs={"password": sensitive_ref}, inject={"password": "LAB_PASSWORD"})
 
     with pytest.raises(SecretResolutionError) as exc_info:
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(cap, [CHILD_PY, "-c", "pass"])
     rendered = str(exc_info.value)
     assert "password" in rendered and "vault" in rendered
     assert sensitive_ref not in rendered and PASS_CANARY not in rendered
@@ -263,14 +264,14 @@ def test_suite_rejects_missing_relative_or_mismatched_trusted_command_before_res
 ) -> None:
     fake = FakeResolver()
     _install_fake(monkeypatch, fake)
-    command = [sys.executable, "-c", "pass"]
+    command = [CHILD_PY, "-c", "pass"]
 
     with pytest.raises(SecretSourceConfigError, match="trusted_argv"):
         CredProvider().exec(_cap(trusted_argv=None), command)
     with pytest.raises(SecretSourceConfigError, match="absolute"):
         CredProvider().exec(_cap(trusted_argv=["python", "-c", "pass"]), command)
     with pytest.raises(SecretSourceConfigError, match="does not match") as exc_info:
-        CredProvider().exec(_cap(), [sys.executable, "-c", "print('arbitrary')"])
+        CredProvider().exec(_cap(), [CHILD_PY, "-c", "print('arbitrary')"])
     assert "arbitrary" not in str(exc_info.value)
     assert fake.resolve_calls == []
 
@@ -298,7 +299,7 @@ def test_suite_child_receives_minimal_env_and_value_free_checkout_receipt(
         "'stale_password':os.environ.get('PASSWORD'),"
         "'receipt':json.loads(os.environ['ACB_CHECKOUT_RECEIPT'])}))"
     )
-    argv = [sys.executable, "-c", code]
+    argv = [CHILD_PY, "-c", code]
 
     assert CredProvider().exec(_cap(trusted_argv=argv), argv) == 0
 
@@ -364,14 +365,14 @@ def test_suite_refuses_receipt_collision_before_resolution(
     monkeypatch.setenv("ACB_CHECKOUT_RECEIPT", "parent-receipt")
 
     with pytest.raises(SecretSourceConfigError, match="nested checkout"):
-        CredProvider().exec(_cap(), [sys.executable, "-c", "pass"])
+        CredProvider().exec(_cap(), [CHILD_PY, "-c", "pass"])
     assert fake.resolve_calls == []
 
     monkeypatch.delenv("ACB_CHECKOUT_RECEIPT")
     with pytest.raises(SecretSourceConfigError, match="reserved"):
         CredProvider().exec(
             _cap(inject={"username": "LAB_USERNAME", "password": "ACB_CHECKOUT_RECEIPT"}),
-            [sys.executable, "-c", "pass"],
+            [CHILD_PY, "-c", "pass"],
         )
     assert fake.resolve_calls == []
 
@@ -393,7 +394,7 @@ def test_suite_launch_failure_and_timeout_emit_value_free_terminal_provenance(
     with pytest.raises(RuntimeError, match="launch failed"):
         CredProvider().exec(_cap(trusted_argv=[missing]), [missing])
 
-    slow = [sys.executable, "-c", "import time; time.sleep(1)"]
+    slow = [CHILD_PY, "-c", "import time; time.sleep(1)"]
     with pytest.raises(RuntimeError, match="timed out"):
         CredProvider().exec(_cap(trusted_argv=slow, timeout_seconds=0.01), slow)
 
@@ -426,10 +427,10 @@ def test_suite_timeout_terminates_grandchild_before_canary_write(
     )
     parent = (
         "import subprocess,time;"
-        f"subprocess.Popen([{sys.executable!r},'-c',{grandchild!r}]);"
+        f"subprocess.Popen([{CHILD_PY!r},'-c',{grandchild!r}]);"
         "time.sleep(5)"
     )
-    argv = [sys.executable, "-c", parent]
+    argv = [CHILD_PY, "-c", parent]
 
     with pytest.raises(RuntimeError, match="timed out"):
         CredProvider().exec(_cap(trusted_argv=argv, timeout_seconds=0.1), argv)
