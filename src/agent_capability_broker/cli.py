@@ -19,6 +19,7 @@ from contextlib import redirect_stdout, suppress
 from pathlib import Path
 
 from . import onboard, provenance
+from .boundary import BoundaryCheck, run_boundary_checks
 from .model import (
     KNOWN_HARNESSES,
     Action,
@@ -27,6 +28,9 @@ from .model import (
     ManifestError,
     Status,
     Verdict,
+    assurance_rank,
+    derive_assurance,
+    parse_boundary,
     parse_manifest,
     resolve_manifest,
 )
@@ -193,6 +197,51 @@ def _surface_checks(findings: list[SurfaceFinding]) -> list[dict[str, object]]:
     ]
 
 
+def _assurance_checks(caps: list[Capability]) -> list[dict[str, object]]:
+    """Per-capability assurance report (Plan 012 §5): effective level vs declared floor.
+
+    The effective level is derived deterministically from the manifest entry
+    (`derive_assurance`). Below the declared floor is a hard ``fail``; a ``D0``
+    capability with no declared floor is a ``warn`` -- reported honestly, never
+    passed. Capabilities that hold no credential (a v1 ``e2e`` entry) are not
+    judged unless they declare a v2 key.
+    """
+    checks: list[dict[str, object]] = []
+    for cap in caps:
+        if cap.provider != "cred" and not cap.declares_v2:
+            continue
+        effective, reason = derive_assurance(cap)
+        floor = cap.declared_assurance
+        if floor is not None and assurance_rank(effective) < assurance_rank(floor):
+            status = "fail"
+            detail = f"effective {effective} is below the declared floor {floor} ({reason})"
+        elif floor is None and effective == "D0":
+            status = "warn"
+            detail = f"D0: a standing secret in the VM, with no assurance floor declared ({reason})"
+        elif floor is None:
+            status = "ok"
+            detail = f"effective {effective}; no floor declared ({reason})"
+        elif effective == "D0":
+            status = "ok"
+            detail = f"effective D0 meets the declared floor D0 (acknowledged; {reason})"
+        else:
+            status = "ok"
+            detail = f"effective {effective} meets the declared floor {floor} ({reason})"
+        checks.append(
+            {
+                "name": f"{cap.id}@assurance",
+                "capability": cap.id,
+                "harness": None,
+                "status": status,
+                "detail": detail,
+                "kind": "assurance",
+                "effective": effective,
+                "declared": floor,
+            }
+        )
+    return checks
+
+
 def _classify_health(checks: list[dict[str, object]]) -> tuple[bool, bool]:
     """Classify component health from checks the way the siblings do.
 
@@ -213,6 +262,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         manifest_path = resolve_manifest(args.manifest)
         verdicts = _inspect_all(manifest_path)
         findings = _surface_findings(manifest_path)
+        assurance = _assurance_checks(parse_manifest(manifest_path))
+        boundary: list[BoundaryCheck] = []
+        if getattr(args, "boundary", False):
+            boundary = run_boundary_checks(parse_boundary(manifest_path))
     except ManifestError as exc:
         # A missing or malformed manifest is an *operational* failure, not a
         # usage error: emit the contract-v1 envelope (§3) and exit 1, not 2.
@@ -220,7 +273,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         # reclassification — acb WI-014 defers that; this read-only path is safe.)
         return emit_error("MANIFEST_ERROR", str(exc), use_json=args.json)
 
-    checks = _doctor_checks(verdicts) + _surface_checks(findings)
+    checks = (
+        _doctor_checks(verdicts)
+        + _surface_checks(findings)
+        + assurance
+        + [b.as_check() for b in boundary]
+    )
     ok, degraded = _classify_health(checks)
 
     if args.json:
@@ -244,6 +302,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _print_table(verdicts)
         for finding in findings:
             print(f"{finding.status.upper():<5} {finding.name}  ({finding.detail})")
+        for a in assurance:
+            print(f"{str(a['status']).upper():<5} {a['name']}  ({a['detail']})")
+        for b in boundary:
+            print(f"{b.verdict.upper():<7} {b.name}  ({b.detail})")
 
     # Exit-code consistent with the JSON verdict (sibling convention: exit 0
     # for ok and degraded, non-zero on a hard fail). Same parity gate as before
@@ -1188,6 +1250,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON (suite health shape)")
+    doctor.add_argument(
+        "--boundary", action="store_true",
+        help="also check the blast-radius rule (read-only): kubeconfig reach, the VM's "
+             "Vault identity, declared admin SSH targets",
+    )
     doctor.set_defaults(func=_cmd_doctor)
 
     shims = sub.add_parser(
