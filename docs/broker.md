@@ -26,7 +26,7 @@ App installation tokens) is `remote-mint` and belongs to `acb-ops` off the VM
                ▼
  acb-broker ─► Vault engine (creds/)        (one VM identity)
    ├─ values: memory only
-   └─ state file: checkout ids + lease ids (never values)
+   └─ state file: checkout ids + token accessors (never values)
 ```
 
 ## Components (`src/agent_capability_broker/broker/`)
@@ -126,8 +126,10 @@ any `front_end`.
 `$ACB_BROKER_STATE`, else `<acb state dir>/broker/checkouts.json`. JSON,
 `acb.broker-state.v1`, mode 0600, written by temp file + fsync + rename. Each
 record: checkout id, capability, harness label, session, issued/expiry,
-issuer kind, assurance, revocation handle (a Vault lease id, or none for
-`vault-kv`), and a pending-revocation flag. **Never a value.**
+issuer kind, assurance, revocation handle and token accessor (the accessor of
+the checkout's Vault child token; none for `vault-kv`), and a
+pending-revocation flag. **Never a value, and never a Vault token.** `list`
+shows the accessor and expiry; the child token itself exists only in memory.
 
 On startup the broker revokes every record left in the file (crash cleanup).
 A revocation that fails stays recorded as pending and the reaper retries it.
@@ -139,12 +141,27 @@ harness process it was attributed to exits (session end, guarded against PID
 reuse by process start time), on `revoke`, and on SIGTERM/SIGINT. The value is
 dropped from memory as soon as revocation starts.
 
-- `vault-k8s-token`: writes `<mount>/creds/<role>` with
-  `kubernetes_namespace` and `ttl`; revokes with
-  `sys/leases/revoke/<lease_id>`. Using the URL form means the VM policy can
-  scope revocation to its own engine paths
-  (`sys/leases/revoke/<mount>/creds/<role>/*`) instead of granting
-  `sys/leases/revoke` broadly.
+- `vault-k8s-token`: **token-bound revocation.** For each checkout the broker
+  creates a child token of its own Vault token (`auth/token/create`: not an
+  orphan, `policies` a subset of the parent's, `ttl` the checkout TTL capped at
+  15 minutes, `num_uses` bounded (3), not renewable, service type), reads
+  `<mount>/creds/<role>` **with the child token**, and holds the child token
+  only in memory. Revocation is `auth/token/revoke-self` called with the child
+  token, and Vault revokes every lease that token created. It never calls
+  `sys/leases/revoke` and never `auth/token/revoke-accessor`, so the VM
+  identity cannot revoke other identities' leases or tokens.
+  - **Broker restart.** The child token is lost with the process; only its
+    accessor and the checkout expiry were persisted. The lease then dies on
+    its own when the child token's TTL expires (at most 15 minutes after the
+    checkout was issued). `recover()` therefore treats an accessor it does not
+    hold as already bound to the TTL: it logs that fact and clears the record.
+  - The optional `issuer.token_policies` list narrows the child token to a
+    dedicated policy (it must be a subset of the broker token's). Omitted, the
+    child inherits the broker's policies. Prefer a dedicated policy holding
+    only `read` on `<mount>/creds/<role>`: it also keeps the child from being
+    able to mint further tokens.
+  - `ttl` of the creds is the checkout's, and the lease cannot outlive the child
+    token, so `Issued.ttl` is bounded by the token's remaining life.
 - `vault-kv`: a static read. Revocation only forgets the in-memory copy; the
   value stays valid in Vault. That is why it is `D0`.
 - `remote-mint`: refuses with `not_implemented` until `acb-ops` exists.
@@ -156,6 +173,33 @@ the WI-016 invariants (`token=""`, fail-closed AppRole) plus a refusal of a
 bare `VAULT_TOKEN`. The broker authenticates once with the VM's AppRole or
 Kubernetes identity and re-authenticates once on an auth error. `hvac` is
 imported only when a Vault issuer first runs.
+
+### Vault policy for the VM identity
+
+The policy is the minimum the broker's calls need (placeholders; adapt mounts
+and roles):
+
+```hcl
+# read the dynamic credentials it hands out
+path "kubernetes/creds/agent-read" { capabilities = ["update"] }   # POST creds/<role>
+# legacy static reads (D0), only the declared paths
+path "kv/data/example/forge/bot"   { capabilities = ["read"] }
+# per-checkout child tokens: they can never exceed the parent's policies
+path "auth/token/create"           { capabilities = ["update"] }
+```
+
+- The `default` policy already grants `auth/token/revoke-self`, which is what the
+  child token uses to revoke itself and its leases. Do not remove `default` from
+  the VM identity or from `token_policies`.
+- **Nothing under `sys/leases`, and not `auth/token/revoke-accessor`.** Either
+  would let a compromised VM revoke other identities' leases or tokens. Nothing
+  under `sys/`, `auth/` (apart from `auth/token/create`), or `identity/`.
+- `acb doctor --boundary` warns (`boundary.vault-revoke-scope`) if the identity
+  holds `sys/leases/revoke` or `auth/token/revoke-accessor`, in addition to the
+  existing admin-path check.
+- Vault caps a child token's TTL at its parent's remaining life, so a checkout
+  can be shorter than asked when the broker's own token is near expiry (the
+  issued TTL reflects it; the session re-authenticates on an auth error).
 
 ## Harness attribution (advisory)
 
@@ -188,6 +232,8 @@ Protected:
   from ptracing it or reading `/proc/<pid>/mem`.
 - Issued credentials are short-lived (≤ 15 min) and revoked early when their
   session ends. Revoking the VM's Vault identity stops all new issuance.
+- A restarted broker cannot revoke the child tokens of the previous run; their
+  leases expire with the token TTL (at most 15 minutes).
 
 Not protected:
 
@@ -214,6 +260,9 @@ On non-Linux platforms `acb-broker` exits 2 with an "unsupported platform"
 message.
 
 ## Follow-ups
+
+- Peer-credential extraction (`SO_PEERCRED` today) moves behind a small platform
+  helper for the workstation zone (Plan 012 section 10 (d)). Not implemented.
 
 - Switch `config.py` to the shared manifest-v2 model once WI-012-2 lands.
 - CLI verbs: `acb checkouts` (read) and `acb revoke` (act, dry-run by

@@ -101,7 +101,10 @@ claim. Every key is optional and additive; a v1 entry stays valid.
 Type and enum violations are ordinary `ManifestError`s, the same path as every
 other core-contract failure. Unknown `issuer.kind` values are accepted (the
 `issuer` table is extensible) but credited as non-issuing by the derivation
-below.
+below. An `assurance` floor of `H1` or `H1+D1` on a `helper`, `proxy` or `env`
+capability is also a `ManifestError` (see "helper and proxy are never H1"), and
+so is a launcher-first `trusted_argv` on a `cred` capability (see the `cred`
+provider).
 
 **Lossless v1 upconvert.** An entry with none of the four keys is read as
 `delivery = {rung = "env"}`, no issuer, and `assurance = "D0"`. Nothing is
@@ -130,6 +133,14 @@ function (`model.derive_assurance`):
 | `helper`, `proxy` or `env` | issuing kind | `D1` |
 | `helper`, `proxy` or `env` | none, `vault-kv`, or unlisted kind | `D0` |
 
+**`helper` and `proxy` are never `H1`.** Root in the VM is accepted, so a native
+credential helper hands the token to any VM process that asks, and an in-VM
+egress proxy holds it in VM memory. Neither hides anything; at best they devalue
+(`D1`, or `D0` for a static issuer such as `vault-kv`). Only `remote-op`, where
+the value never enters the VM, can be `H1`. Declaring `H1` or `H1+D1` for any
+other rung is refused when the manifest is parsed and, independently, is a
+failing `doctor` check.
+
 Issuing kinds: `vault-ssh-ca`, `vault-k8s-token`, `vault-ldap-library`,
 `vault-ldap-static`, `vault-database`, `vault-pki`, `remote-mint`. `vault-kv` is
 static. The derivation reads only the manifest entry; it makes no probe.
@@ -139,7 +150,9 @@ capability (every `cred`, plus any capability declaring a v2 key):
 
 | Condition | Status |
 |---|---|
+| declared floor `H1` / `H1+D1` on a `helper`, `proxy` or `env` rung | `fail` (unattainable: only `remote-op` hides the value) |
 | effective level below the declared floor | `fail` |
+| effective `D0` on a `helper` or `proxy` rung (static or unlisted issuer), whatever floor is declared | `warn`, suggesting `remote-op` |
 | effective `D0`, no floor declared | `warn` (honest, never a pass) |
 | effective `D0`, floor declared `D0` | `ok` (acknowledged) |
 | otherwise | `ok` |
@@ -207,9 +220,22 @@ First two providers:
   but never resolves a value. **Every** `cred` capability, whatever its source,
   requires an absolute `trusted_argv` whose complete argv must match the
   `acb exec` command exactly before any value is resolved (Plan 012 section 5); its first
-  element may not be a shell or interpreter (`sh`, `bash`, `zsh`, `dash`, `pwsh`,
-  `powershell`, `cmd`, `python*`, `node`, `perl`, `ruby`, `env`). A missing or
-  interpreter-first `trusted_argv` is a failing `doctor` check, and
+  element may not be a shell, interpreter or exec wrapper. The denylist lives in
+  one place (`launchers.py`): the shells (`sh`, `bash`, `zsh`, `dash`, `ksh`, `csh`,
+  `tcsh`, `fish`, `pwsh`, `powershell`, `cmd`), multi-call binaries (`busybox`,
+  `toybox`), interpreters and launchers (`python*`, `py`, `node`, `perl`, `ruby`,
+  `php`, `lua`, `tclsh`, `wish`, `expect`, `deno`, `bun`, `bunx`, `npx`, `uv`,
+  `uvx`, `osascript`, `wscript`, `cscript`, `mshta`, `rundll32`, `regsvr32`),
+  text tools that execute (`awk`, `gawk`, `mawk`, `sed`), wrappers that exec
+  what follows (`env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `sudo`,
+  `doas`, `su`, `xargs`, `find`, `script`) and `ssh`. Matching is on the
+  basename, case-insensitive, with `.exe .com .bat .cmd .ps1` stripped and
+  version suffixes covered (`python3.13`, `lua5.4`, `php8.3`, `ruby3.2`,
+  `perl5.38`, `node22`). The same rule runs when the manifest is parsed (a
+  launcher-first `trusted_argv` is a `ManifestError`), in `doctor`, and at
+  `acb exec`. It is a lint guard against operator mistakes, not a sandbox: the
+  control is the exact full-argv match against an operator-reviewed manifest. A
+  missing `trusted_argv` is a failing `doctor` check, and
   `acb exec cred:x -- env` is refused before Vault is contacted. Suite execution
   additionally gets a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
   the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`, where

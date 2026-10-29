@@ -4,14 +4,22 @@ Plan 012 §2: **the VM's identity may obtain issued credentials, never the
 means to issue them.** So the in-VM issuers are thin:
 
 - ``vault-k8s-token`` — Vault's Kubernetes secrets engine mints a short-lived
-  service-account token inside Vault (``<mount>/creds/<role>``); the broker
-  revokes the lease. ``D1``.
+  service-account token inside Vault (``<mount>/creds/<role>``). The creds are
+  read with a per-checkout **child token** of the broker's own token, and
+  revoked with ``auth/token/revoke-self`` called by that child (Vault revokes
+  every lease the token created). The VM policy therefore needs nothing under
+  ``sys/leases`` and not ``auth/token/revoke-accessor``. ``D1``.
 - ``vault-kv`` — a legacy static KV v2 read. ``D0`` by definition: the value
   is a standing secret and revoking the checkout only forgets the in-memory
   copy; nothing in Vault can be revoked.
 - ``remote-mint`` — declared for manifests, served by ``acb-ops`` off the VM
   (Plan 012 P2). Here it refuses with ``not_implemented``.
 - ``fake`` — tests only; never registered by the entry point.
+
+Child tokens live only in this process's memory. If the broker restarts, the
+token is gone and its lease simply expires with the token's TTL (at most 15
+minutes); only the token *accessor* and the checkout expiry are persisted, for
+``checkouts`` display. See ``docs/broker.md``.
 
 Vault access goes through ``cred_vault`` (lazily imported — the broker never
 imports ``hvac`` at module import time), reusing its WI-016 fail-closed auth
@@ -25,14 +33,17 @@ interpolate a value or a Vault response body.
 
 from __future__ import annotations
 
-import re
+import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .config import BrokerCapability
 from .protocol import ErrorCode
+
+log = logging.getLogger("acb.broker")
 
 
 class IssuerError(Exception):
@@ -58,7 +69,8 @@ class IssueContext:
 class Issued:
     value_fields: dict[str, str] = field(repr=False)
     ttl: int
-    revocation_handle: str | None  # e.g. a Vault lease id; never a value
+    revocation_handle: str | None  # opaque, e.g. a Vault child-token accessor; never a value
+    accessor: str | None = None    # non-secret reference persisted for `checkouts` display
 
 
 class Issuer(Protocol):
@@ -177,15 +189,172 @@ class VaultSession:
             ) from exc
 
 
-# Lease ids look like `kubernetes/creds/<role>/<random>`. They are spliced into a
-# request path (`sys/leases/revoke/<lease_id>`), so anything else is refused.
-_LEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]{0,511}$")
+#: A child token (and so the lease read with it) never outlives the checkout, and
+#: never lives longer than this regardless of the manifest (Plan 012 section 6).
+CHILD_TOKEN_MAX_TTL = 15 * 60
+#: Uses a child token is allowed: the creds read, ``revoke-self``, and one retry of
+#: either. Bounded so a leaked token cannot be replayed freely. It must stay above
+#: the number of uses the broker itself needs: a token whose last use is spent is
+#: revoked by Vault, and that revokes its leases.
+CHILD_TOKEN_NUM_USES = 3
 
 
-def _valid_lease(handle: str) -> str:
-    if not _LEASE_RE.match(handle) or ".." in handle.split("/"):
-        raise IssuerError(ErrorCode.ISSUER_ERROR, "revocation handle is not a Vault lease id")
-    return handle
+def _default_child_client(parent: Any, token: str) -> Any:
+    """A client authenticated with ``token`` only (lazy ``hvac`` import).
+
+    Built like ``cred_vault.authenticated_client``: ``token`` is passed explicitly
+    (never ``None``, which would make hvac read ``$VAULT_TOKEN`` and
+    ``~/.vault-token``) and nothing else is inherited from the parent.
+    """
+    import hvac
+
+    return hvac.Client(url=parent.url, token=token)
+
+
+@dataclass
+class _Child:
+    """A live per-checkout child token. In-memory only; never persisted or logged."""
+
+    client: Any = field(repr=False)
+    expires_at: float
+
+
+class ChildTokenLeases:
+    """Token-bound lease management for dynamic Vault engines.
+
+    ``sys/leases/revoke`` would let the VM identity revoke *other* identities'
+    leases, and ``auth/token/revoke-accessor`` would let it revoke any token it
+    can learn the accessor of -- both broader than the VM needs. Instead, each
+    checkout gets its own child token (``auth/token/create``: non-orphan,
+    policies a subset of the parent's, ttl = the checkout's, capped at 15 min,
+    bounded ``num_uses``, not renewable, service type). The creds are read with
+    the child token, so Vault ties the lease to it, and revocation is the child
+    calling ``auth/token/revoke-self``, which revokes everything the token
+    created. Letting the token expire does the same, so a broker restart (the
+    token held in memory is lost) leaves the lease to die with the TTL.
+    """
+
+    def __init__(
+        self,
+        session: VaultSession,
+        *,
+        clock: Callable[[], float] = time.time,
+        client_factory: Callable[[Any, str], Any] | None = None,
+    ) -> None:
+        self._session = session
+        self._clock = clock
+        self._client_factory = client_factory or _default_child_client
+        self._held: dict[str, _Child] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def clock(self) -> Callable[[], float]:
+        return self._clock
+
+    def held(self) -> int:
+        """How many child tokens this process currently holds (for tests/status)."""
+        with self._lock:
+            return len(self._held)
+
+    def issue(
+        self,
+        what: str,
+        ttl: int,
+        policies: list[str] | None,
+        read: Callable[[Any], Any],
+    ) -> tuple[Any, str, float]:
+        """Mint a child token, run ``read(child_client)`` with it.
+
+        Returns ``(result, accessor, expires_at)``. On any failure after the token
+        exists it is revoked straight away (best effort) so nothing dangles.
+        """
+        child_ttl = max(1, min(ttl, CHILD_TOKEN_MAX_TTL))
+        body: dict[str, Any] = {
+            "ttl": f"{child_ttl}s",
+            "num_uses": CHILD_TOKEN_NUM_USES,
+            "renewable": False,
+            "type": "service",
+            "no_parent": False,      # explicit: a child, never an orphan
+            "display_name": "acb-broker",
+        }
+        if policies:
+            body["policies"] = list(policies)  # must be a subset of the parent's
+        parent: list[Any] = []
+
+        def mint(c: Any) -> Any:
+            parent[:] = [c]
+            return c.write_data("auth/token/create", data=body)
+
+        resp = self._session.call(f"vault child token for {what}", mint)
+        auth = resp.get("auth") if isinstance(resp, dict) else None
+        token = auth.get("client_token") if isinstance(auth, dict) else None
+        accessor = auth.get("accessor") if isinstance(auth, dict) else None
+        if (
+            not isinstance(auth, dict)
+            or not isinstance(token, str) or not token
+            or not isinstance(accessor, str) or not accessor
+        ):
+            raise IssuerError(
+                ErrorCode.ISSUER_ERROR, f"vault child token for {what}: unexpected response shape"
+            )
+        duration = auth.get("lease_duration")
+        if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
+            child_ttl = min(child_ttl, duration)
+        child = _Child(
+            client=self._client_factory(parent[0], token), expires_at=self._clock() + child_ttl
+        )
+        try:
+            result = read(child.client)
+        except Exception as exc:
+            self._revoke_quietly(child)
+            if isinstance(exc, IssuerError):
+                raise
+            raise IssuerError(
+                ErrorCode.ISSUER_ERROR, f"{what} failed ({type(exc).__name__})"
+            ) from exc
+        with self._lock:
+            self._held[accessor] = child
+        return result, accessor, child.expires_at
+
+    def revoke(self, accessor: str | None) -> None:
+        """``auth/token/revoke-self`` with the checkout's own child token.
+
+        An accessor this process does not hold (it restarted) is not an error:
+        the lease dies with the token's TTL, and that is all that can be done
+        without a broader Vault capability.
+        """
+        if accessor is None:
+            return
+        with self._lock:
+            child = self._held.get(accessor)
+        if child is None:
+            log.info(
+                "child token %s is not held (broker restarted?); its lease expires with the "
+                "token TTL (<= %ds)", accessor, CHILD_TOKEN_MAX_TTL,
+            )
+            return
+        if self._clock() >= child.expires_at:
+            # Vault already revoked the token (and so its leases) at expiry.
+            with self._lock:
+                self._held.pop(accessor, None)
+            return
+        try:
+            child.client.write_data("auth/token/revoke-self")
+        except Exception as exc:
+            raise IssuerError(
+                ErrorCode.ISSUER_ERROR, f"vault token revoke-self failed ({type(exc).__name__})"
+            ) from exc
+        with self._lock:
+            self._held.pop(accessor, None)
+
+    def _revoke_quietly(self, child: _Child) -> None:
+        try:
+            child.client.write_data("auth/token/revoke-self")
+        except Exception as exc:
+            log.warning(
+                "could not revoke an unused child token (%s); it expires with its TTL",
+                type(exc).__name__,
+            )
 
 
 class VaultKvIssuer:
@@ -235,12 +404,17 @@ class VaultKvIssuer:
 
 
 class VaultK8sTokenIssuer:
-    """Vault Kubernetes secrets engine: ``<mount>/creds/<role>``. ``D1``."""
+    """Vault Kubernetes secrets engine: ``<mount>/creds/<role>``. ``D1``.
+
+    Read with a per-checkout child token; revoked with that token's
+    ``revoke-self`` (see :class:`ChildTokenLeases`). Needs no ``sys/leases``.
+    """
 
     kind = "vault-k8s-token"
 
-    def __init__(self, session: VaultSession) -> None:
+    def __init__(self, session: VaultSession, *, leases: ChildTokenLeases | None = None) -> None:
         self._session = session
+        self._leases = leases or ChildTokenLeases(session)
 
     def issue(self, cap: BrokerCapability, ctx: IssueContext) -> Issued:
         p = cap.issuer.params
@@ -254,35 +428,33 @@ class VaultK8sTokenIssuer:
             data["audiences"] = ",".join(str(a) for a in p["audiences"])
         if "cluster_role_binding" in p:
             data["cluster_role_binding"] = bool(p["cluster_role_binding"])
-        resp = self._session.call(
+        policies = [str(x) for x in p["token_policies"]] if "token_policies" in p else None
+        resp, accessor, token_expiry = self._leases.issue(
             f"vault k8s creds for {cap.id}",
-            lambda c: c.write_data(f"{mount}/creds/{role}", data=data),
+            ctx.ttl,
+            policies,
+            lambda child: child.write_data(f"{mount}/creds/{role}", data=data),
         )
         shape_err = IssuerError(
             ErrorCode.ISSUER_ERROR, f"vault k8s creds for {cap.id}: unexpected response shape"
         )
-        if not isinstance(resp, dict):
-            raise shape_err
-        lease_id = resp.get("lease_id")
-        duration = resp.get("lease_duration")
-        body = resp.get("data")
+        body = resp.get("data") if isinstance(resp, dict) else None
         token = body.get("service_account_token") if isinstance(body, dict) else None
-        if not isinstance(lease_id, str) or not lease_id or not isinstance(token, str) or not token:
+        if not isinstance(resp, dict) or not isinstance(token, str) or not token:
+            self._leases.revoke(accessor)
             raise shape_err
+        duration = resp.get("lease_duration")
         ttl = ctx.ttl
         if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
             ttl = min(ttl, duration)
-        return Issued(value_fields={"token": token}, ttl=ttl, revocation_handle=lease_id)
+        # The lease cannot outlive the child token that created it.
+        ttl = max(1, min(ttl, int(token_expiry - self._leases.clock())))
+        return Issued(
+            value_fields={"token": token}, ttl=ttl, revocation_handle=accessor, accessor=accessor
+        )
 
     def revoke(self, handle: str | None) -> None:
-        if handle is None:
-            return
-        lease = _valid_lease(handle)
-        # The URL form (`sys/leases/revoke/<lease_id>`) lets the VM policy scope
-        # revocation to its own engine paths: `sys/leases/revoke/<mount>/creds/<role>/*`.
-        self._session.call("vault lease revoke", lambda c: c.write_data(
-            f"sys/leases/revoke/{lease}"
-        ))
+        self._leases.revoke(handle)
 
 
 class RemoteMintIssuer:
@@ -313,6 +485,9 @@ def default_issuers(session: VaultSession | None = None) -> dict[str, Issuer]:
 
 
 __all__ = [
+    "CHILD_TOKEN_MAX_TTL",
+    "CHILD_TOKEN_NUM_USES",
+    "ChildTokenLeases",
     "FakeIssuer",
     "IssueContext",
     "Issued",

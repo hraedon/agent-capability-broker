@@ -3,8 +3,9 @@
 Each checkout's **value** lives only in this process's memory
 (``Checkout.value``). The **state file** holds what revocation needs to
 survive a restart — checkout id, capability, harness label, session,
-issued/expiry, issuer kind and an opaque revocation handle (e.g. a Vault
-lease id) — and never a value. It is JSON, mode 0600, written atomically
+issued/expiry, issuer kind, an opaque revocation handle and a non-secret
+accessor for display (a Vault child-token *accessor*, never the token) — and
+never a value. It is JSON, mode 0600, written atomically
 (temp file + fsync + rename) under a directory created 0700.
 
 Lifecycle:
@@ -68,13 +69,14 @@ class Checkout:
     anchor_pid: int | None = None
     anchor_start: int | None = None
     revoke_pending: bool = False
+    accessor: str | None = None
     # In memory only. Never serialized, never in repr, never in metadata().
     value: dict[str, str] | None = field(default=None, repr=False, compare=False)
 
     _RECORD_KEYS = (
         "id", "capability", "harness", "session", "issued_at", "expires_at",
         "issuer_kind", "assurance", "revocation_handle", "anchor_pid", "anchor_start",
-        "revoke_pending",
+        "revoke_pending", "accessor",
     )
 
     def record(self) -> dict[str, Any]:
@@ -108,6 +110,7 @@ class Checkout:
                     else str(rec["revocation_handle"])
                 ),
                 revoke_pending=bool(rec.get("revoke_pending", False)),
+                accessor=None if rec.get("accessor") is None else str(rec["accessor"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("checkout record is malformed") from exc

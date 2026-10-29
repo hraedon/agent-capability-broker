@@ -27,6 +27,9 @@ from agent_capability_broker.broker.config import (
 )
 from agent_capability_broker.broker.harness import Attribution, attribute, pid_alive
 from agent_capability_broker.broker.issuers import (
+    CHILD_TOKEN_MAX_TTL,
+    CHILD_TOKEN_NUM_USES,
+    ChildTokenLeases,
     FakeIssuer,
     IssueContext,
     IssuerError,
@@ -480,11 +483,52 @@ class Forbidden(Exception):
     """Stands in for hvac.exceptions.Forbidden (matched by name)."""
 
 
+class FakeChild:
+    """The client a child token authenticates; records what it was asked to do."""
+
+    def __init__(self, vault: FakeVault, token: str, accessor: str) -> None:
+        self.vault = vault
+        self.token = token
+        self.accessor = accessor
+        self.writes: list[tuple[str, dict[str, Any] | None]] = []
+        self.revoked = False
+        self.fail_revoke = False
+
+    def write_data(
+        self, path: str, *, data: dict[str, Any] | None = None, wrap_ttl: str | None = None
+    ) -> Any:
+        self.writes.append((path, data))
+        if path == "auth/token/revoke-self":
+            if self.fail_revoke:
+                raise ConnectionError(f"vault unreachable {CANARY}")
+            self.revoked = True
+            return None
+        if self.revoked:
+            raise Forbidden("permission denied")
+        if "/creds/" in path:
+            n = len(self.writes)
+            return {
+                "lease_id": f"{path}/lease-{self.accessor}-{n}",
+                "lease_duration": 300,
+                "renewable": False,
+                "data": {
+                    "service_account_name": "vault-sa",
+                    "service_account_namespace": "agents",
+                    "service_account_token": f"{CANARY}-k8s-{self.accessor}",
+                },
+            }
+        return None
+
+
 class FakeVault:
+    """The broker's own (parent) client: it can create child tokens and read KV."""
+
     def __init__(self, *, fail_first: bool = False) -> None:
         self.writes: list[tuple[str, dict[str, Any] | None]] = []
         self.fail_first = fail_first
         self.store: dict[str, dict[str, Any]] = {}
+        self.children: list[FakeChild] = []
+        self.url = "https://vault.example.test:8200"
         # client.secrets.kv.v2.read_secret_version(...) resolves back to self.
         self.secrets = self.kv = self.v2 = self
 
@@ -495,17 +539,19 @@ class FakeVault:
             self.fail_first = False
             raise Forbidden("permission denied")
         self.writes.append((path, data))
-        if "/creds/" in path:
-            n = len(self.writes)
+        if path == "auth/token/create":
+            n = len(self.children) + 1
+            child = FakeChild(self, f"{CANARY}-child-token-{n}", f"accessor-{n}")
+            self.children.append(child)
+            ttl = int(str((data or {}).get("ttl", "0s")).rstrip("s"))
             return {
-                "lease_id": f"{path}/lease{n}",
-                "lease_duration": 300,
-                "renewable": False,
-                "data": {
-                    "service_account_name": "vault-sa",
-                    "service_account_namespace": "agents",
-                    "service_account_token": f"{CANARY}-k8s-{n}",
-                },
+                "auth": {
+                    "client_token": child.token,
+                    "accessor": child.accessor,
+                    "policies": ["default"],
+                    "lease_duration": ttl,
+                    "renewable": False,
+                }
             }
         return None
 
@@ -513,6 +559,19 @@ class FakeVault:
         self, *, mount_point: str, path: str, raise_on_deleted_version: bool
     ) -> dict[str, Any]:
         return {"data": {"data": self.store[f"{mount_point}/{path}"]}}
+
+
+def child_factory(parent: FakeVault, token: str) -> FakeChild:
+    return next(c for c in parent.children if c.token == token)
+
+
+def k8s_issuer(
+    session: VaultSession, clock: Any = None
+) -> tuple[VaultK8sTokenIssuer, ChildTokenLeases]:
+    leases = ChildTokenLeases(
+        session, client_factory=child_factory, **({"clock": clock} if clock else {})
+    )
+    return VaultK8sTokenIssuer(session, leases=leases), leases
 
 
 def _cap(issuer: dict[str, Any]) -> BrokerCapability:
@@ -524,28 +583,229 @@ CTX = IssueContext(capability_id="cred:v", harness="claude", session="s", ttl=60
 
 
 class TestVaultIssuers:
-    def test_k8s_token_issue_and_revoke(self) -> None:
+    def test_k8s_token_issue_reads_with_a_child_token_and_revoke_self_revokes_it(self) -> None:
         vault = FakeVault()
-        issuer = VaultK8sTokenIssuer(VaultSession(lambda: vault))
+        issuer, leases = k8s_issuer(VaultSession(lambda: vault))
         cap = _cap({"kind": "vault-k8s-token", "mount": "k8s", "role": "agent-read",
                     "namespace": "agents", "ttl": "10m", "audiences": ["a", "b"]})
         issued = issuer.issue(cap, CTX)
-        assert vault.writes[0] == (
+
+        # The parent only ever creates the child token; the creds read is the child's.
+        assert [p for p, _ in vault.writes] == ["auth/token/create"]
+        (child,) = vault.children
+        assert child.writes == [(
             "k8s/creds/agent-read",
             {"kubernetes_namespace": "agents", "ttl": "600s", "audiences": "a,b"},
-        )
-        assert issued.value_fields == {"token": f"{CANARY}-k8s-1"}
+        )]
+        assert issued.value_fields == {"token": f"{CANARY}-k8s-accessor-1"}
         assert issued.ttl == 300  # Vault's lease_duration wins when shorter
-        assert issued.revocation_handle == "k8s/creds/agent-read/lease1"
-        assert CANARY not in repr(issued)
-        issuer.revoke(issued.revocation_handle)
-        assert vault.writes[1] == ("sys/leases/revoke/k8s/creds/agent-read/lease1", None)
+        assert issued.revocation_handle == "accessor-1" == issued.accessor
+        assert CANARY not in repr(issued) and CANARY not in repr(leases)
+        assert leases.held() == 1
 
-    def test_k8s_token_refuses_path_injection_in_handle(self) -> None:
-        issuer = VaultK8sTokenIssuer(VaultSession(FakeVault))
-        for bad in ("../../sys/seal", "/abs", "a/../b", "x?y=1"):
-            with pytest.raises(IssuerError):
-                issuer.revoke(bad)
+        issuer.revoke(issued.revocation_handle)
+        assert child.writes[-1] == ("auth/token/revoke-self", None)  # the child revokes itself
+        assert child.revoked and leases.held() == 0
+        # Nothing broad is ever asked of Vault: no lease revoke, no revoke-accessor.
+        asked = [p for p, _ in vault.writes] + [p for p, _ in child.writes]
+        assert not any(p.startswith("sys/leases") or "revoke-accessor" in p for p in asked)
+        assert [p for p in asked if "revoke" in p] == ["auth/token/revoke-self"]
+
+    def test_child_token_is_a_bounded_non_orphan_service_token(self) -> None:
+        vault = FakeVault()
+        issuer, _ = k8s_issuer(VaultSession(lambda: vault))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        issuer.issue(cap, CTX)
+        (path, body) = vault.writes[0]
+        assert path == "auth/token/create"  # not create-orphan, not a batch token
+        assert body is not None
+        assert body["ttl"] == "600s"
+        assert body["type"] == "service"
+        assert body["renewable"] is False
+        assert body["no_parent"] is False
+        assert 2 <= body["num_uses"] <= CHILD_TOKEN_NUM_USES  # read + revoke-self at least
+        assert "policies" not in body  # omitted: inherits (exactly a subset of) the parent's
+
+    def test_child_token_ttl_is_capped_at_15_minutes(self) -> None:
+        vault = FakeVault()
+        leases = ChildTokenLeases(VaultSession(lambda: vault), client_factory=child_factory)
+        leases.issue("t", 3600, None, lambda c: c.write_data("k8s/creds/r"))
+        assert vault.writes[0][1]["ttl"] == f"{CHILD_TOKEN_MAX_TTL}s" == "900s"  # type: ignore[index]
+        leases.issue("t", 0, None, lambda c: c.write_data("k8s/creds/r"))
+        assert vault.writes[1][1]["ttl"] == "1s"  # type: ignore[index]
+
+    def test_child_token_policies_are_the_declared_subset(self) -> None:
+        vault = FakeVault()
+        issuer, _ = k8s_issuer(VaultSession(lambda: vault))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n",
+                    "token_policies": ["acb-k8s-read"]})
+        issuer.issue(cap, CTX)
+        assert vault.writes[0][1]["policies"] == ["acb-k8s-read"]  # type: ignore[index]
+        with pytest.raises(BrokerConfigError):
+            _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n",
+                  "token_policies": "acb-k8s-read"})
+
+    def test_restart_loses_the_token_and_revoke_is_a_ttl_bound_noop(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        vault = FakeVault()
+        issuer, _ = k8s_issuer(VaultSession(lambda: vault))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        issued = issuer.issue(cap, CTX)
+
+        # A new process knows only the accessor (that is all the state file holds).
+        again, leases2 = k8s_issuer(VaultSession(lambda: vault))
+        with caplog.at_level(logging.INFO, logger="acb.broker"):
+            again.revoke(issued.revocation_handle)
+        assert leases2.held() == 0
+        assert not vault.children[0].revoked  # nothing could be revoked: no token, no revoke
+        assert len(vault.writes) == 1  # and no broader fallback was attempted
+        assert "expires with the token TTL" in caplog.text
+        assert CANARY not in caplog.text
+
+    def test_failed_revoke_self_raises_value_free_and_is_retried(self) -> None:
+        vault = FakeVault()
+        issuer, leases = k8s_issuer(VaultSession(lambda: vault))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        issued = issuer.issue(cap, CTX)
+        vault.children[0].fail_revoke = True
+        with pytest.raises(IssuerError) as ei:
+            issuer.revoke(issued.revocation_handle)
+        assert CANARY not in ei.value.message and "ConnectionError" in ei.value.message
+        assert leases.held() == 1  # the token is kept so the registry can retry
+        vault.children[0].fail_revoke = False
+        issuer.revoke(issued.revocation_handle)
+        assert vault.children[0].revoked and leases.held() == 0
+
+    def test_revoke_after_the_token_expired_makes_no_vault_call(self) -> None:
+        class T:
+            now = 1_000.0
+
+            def __call__(self) -> float:
+                return self.now
+
+        clock = T()
+        vault = FakeVault()
+        issuer, leases = k8s_issuer(VaultSession(lambda: vault), clock)
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        issued = issuer.issue(cap, CTX)
+        clock.now += 601  # Vault expired the token, and with it the lease
+        before = len(vault.children[0].writes)
+        issuer.revoke(issued.revocation_handle)
+        assert len(vault.children[0].writes) == before and leases.held() == 0
+
+    def test_failed_creds_read_revokes_the_unused_child_token(self) -> None:
+        class DeniedChild(FakeChild):
+            def write_data(self, path: str, *, data: Any = None, wrap_ttl: Any = None) -> Any:
+                if "/creds/" in path:
+                    self.writes.append((path, data))
+                    raise ValueError(f"server said {CANARY}")
+                return super().write_data(path, data=data, wrap_ttl=wrap_ttl)
+
+        class V(FakeVault):
+            def write_data(self, path: str, *, data: Any = None, wrap_ttl: Any = None) -> Any:
+                resp = super().write_data(path, data=data, wrap_ttl=wrap_ttl)
+                if path == "auth/token/create":
+                    old = self.children.pop()
+                    self.children.append(DeniedChild(self, old.token, old.accessor))
+                return resp
+
+        vault = V()
+        issuer, leases = k8s_issuer(VaultSession(lambda: vault))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        with pytest.raises(IssuerError) as ei:
+            issuer.issue(cap, CTX)
+        assert CANARY not in ei.value.message and "ValueError" in ei.value.message
+        assert vault.children[0].revoked and leases.held() == 0  # nothing dangles
+
+    def test_creds_bad_response_shape_revokes_the_child(self) -> None:
+        class Empty(FakeChild):
+            def write_data(self, path: str, *, data: Any = None, wrap_ttl: Any = None) -> Any:
+                if "/creds/" in path:
+                    return {"data": {}}
+                return super().write_data(path, data=data, wrap_ttl=wrap_ttl)
+
+        class V(FakeVault):
+            def write_data(self, path: str, *, data: Any = None, wrap_ttl: Any = None) -> Any:
+                resp = super().write_data(path, data=data, wrap_ttl=wrap_ttl)
+                if path == "auth/token/create":
+                    old = self.children.pop()
+                    self.children.append(Empty(self, old.token, old.accessor))
+                return resp
+
+        vault = V()
+        issuer, leases = k8s_issuer(VaultSession(lambda: vault))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        with pytest.raises(IssuerError, match="unexpected response shape"):
+            issuer.issue(cap, CTX)
+        assert vault.children[0].revoked and leases.held() == 0
+
+    def test_child_token_bad_response_shape(self) -> None:
+        class Empty(FakeVault):
+            def write_data(self, path: str, *, data: Any = None, wrap_ttl: Any = None) -> Any:
+                return {"auth": {"accessor": "x"}}  # no client_token
+
+        issuer, leases = k8s_issuer(VaultSession(Empty))
+        cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
+        with pytest.raises(IssuerError, match="unexpected response shape"):
+            issuer.issue(cap, CTX)
+        assert leases.held() == 0
+
+    def test_default_child_client_authenticates_with_the_child_token_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """hvac is never handed ``token=None`` (it would read VAULT_TOKEN / ~/.vault-token)."""
+        built: list[dict[str, Any]] = []
+
+        class _Hvac:
+            class Client:
+                def __init__(self, **kw: Any) -> None:
+                    built.append(kw)
+
+        monkeypatch.setitem(sys.modules, "hvac", _Hvac)  # type: ignore[arg-type]
+        from agent_capability_broker.broker.issuers import _default_child_client
+
+        _default_child_client(FakeVault(), "child-token-value")
+        assert built == [{"url": "https://vault.example.test:8200", "token": "child-token-value"}]
+
+    def test_state_file_and_listing_hold_the_accessor_never_a_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "prov"))
+        vault = FakeVault()
+        issuer, leases = k8s_issuer(VaultSession(lambda: vault))
+        issuers = {"vault-k8s-token": issuer}
+        cfg = parse_broker_config({"capability": {"cred:k8s": {
+            "provider": "cred",
+            "issuer": {"kind": "vault-k8s-token", "role": "r", "namespace": "n", "ttl": "10m"},
+            "delivery": {"rung": "helper", "tool": "kubectl"},
+        }}})
+        reg = Registry(
+            tmp_path / "state" / "checkouts.json", issuers, events=provenance_events,
+            alive=lambda pid, start: True,
+        )
+        hint_only = tmp_path / "no-proc"
+        broker = Broker(
+            cfg, reg, issuers,
+            attribute_fn=lambda pid, hint: attribute(pid, hint, proc_root=hint_only),
+        )
+        out = broker.handle(req("checkout", {"capability": "cred:k8s"}, front_end="kube"), PEER)
+        assert out["ok"] and out["result"]["value"]["token"].startswith(CANARY)  # rung-1 handoff
+        assert out["result"]["accessor"] == "accessor-1"  # for `checkouts` display
+        listing = broker.handle(req("list"), PEER)
+        assert listing["result"]["checkouts"][0]["accessor"] == "accessor-1"
+        assert "revocation_handle" not in listing["result"]["checkouts"][0]
+        state = (tmp_path / "state" / "checkouts.json").read_text(encoding="utf-8")
+        record = json.loads(state)["checkouts"][0]
+        assert record["accessor"] == "accessor-1" and record["expires_at"] > record["issued_at"]
+        assert vault.children[0].token not in state  # the child token is memory-only
+        record_json = json.dumps(read_state(reg.state_path)[0].record())
+        assert_no_canary(tmp_path, json.dumps(listing), record_json)
+
+        done = broker.handle(req("revoke", {"all": True}), PEER)
+        assert done["result"]["revoked"] == [out["result"]["id"]]
+        assert vault.children[0].revoked and leases.held() == 0
+        assert not (tmp_path / "state" / "checkouts.json").read_text().count("accessor-1")
 
     def test_k8s_token_bad_response_shape(self) -> None:
         class Empty(FakeVault):
@@ -565,10 +825,10 @@ class TestVaultIssuers:
             made.append(clients[len(made)])
             return made[-1]
 
-        issuer = VaultK8sTokenIssuer(VaultSession(factory))
+        issuer, _ = k8s_issuer(VaultSession(factory))
         cap = _cap({"kind": "vault-k8s-token", "role": "r", "namespace": "n"})
         issuer.issue(cap, CTX)
-        assert len(made) == 2 and clients[1].writes
+        assert len(made) == 2 and clients[1].writes and clients[1].children[0].writes
 
     def test_other_errors_are_value_free_issuer_errors(self) -> None:
         class Boom(FakeVault):

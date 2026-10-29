@@ -16,6 +16,8 @@ from pathlib import Path
 
 import platformdirs
 
+from .launchers import LAUNCHER_REFUSAL, is_launcher
+
 # Providers the core knows how to dispatch to. The core validates only that a
 # capability names a known provider and lists harnesses; provider-specific keys
 # (vault, engine, backend, ...) are validated by the provider itself.
@@ -28,6 +30,28 @@ KNOWN_HARNESSES = frozenset({"claude", "opencode", "codex", "hermes", "zcode"})
 DELIVERY_RUNGS = ("helper", "proxy", "remote-op", "env")
 ASSURANCE_LEVELS = ("D0", "D1", "H1", "H1+D1")  # weakest -> strongest
 DECISIONS = ("auto", "approve", "deny")
+
+# Only a value that never enters the VM can be hidden. Root in the VM is
+# accepted (Plan 012 section 1), so a native credential helper (any process in
+# the VM can ask it for the token) and an in-VM egress proxy (the token sits in
+# VM memory) can at best devalue (D1); ``env`` injects the value outright.
+HIDDEN_LEVELS = ("H1", "H1+D1")
+HIDING_RUNGS = ("remote-op",)
+
+
+def hidden_floor_problem(rung: str, floor: str | None) -> str | None:
+    """Why ``floor`` cannot be met by ``rung``, or None when it is attainable.
+
+    Pure. Used at manifest parse time and by ``doctor`` so the two cannot
+    disagree: an ``H1`` / ``H1+D1`` floor is only meaningful on ``remote-op``.
+    """
+    if floor in HIDDEN_LEVELS and rung not in HIDING_RUNGS:
+        return (
+            f"declared floor {floor} is unattainable on the {rung!r} rung: the value "
+            f"enters the VM and root in the VM is accepted, so only 'remote-op' "
+            f"(the value never enters the VM) can be H1; {rung} is at best D1"
+        )
+    return None
 
 # Issuer kinds that *mint* a scoped, expiring credential (so what reaches the VM
 # is devalued, D1). Anything else -- ``vault-kv`` and any kind not listed here --
@@ -315,6 +339,7 @@ def parse_manifest(path: Path) -> list[Capability]:
                 f"(known: {sorted(KNOWN_HARNESSES)})"
             )
         issuer, delivery, assurance, decision = _parse_v2(cap_id, body)
+        _lint_trusted_argv(cap_id, provider, body)
         options = {
             k: v for k, v in body.items() if k not in {"provider", "harnesses", *_V2_KEYS}
         }
@@ -331,6 +356,22 @@ def parse_manifest(path: Path) -> list[Capability]:
             )
         )
     return caps
+
+
+def _lint_trusted_argv(cap_id: str, provider: object, body: dict[str, object]) -> None:
+    """Refuse a launcher-first ``trusted_argv`` when the manifest is parsed.
+
+    The same ``launchers.is_launcher`` rule ``acb exec`` and ``doctor`` apply, run
+    early so a bad declaration fails before anything can exec. Only a
+    well-formed first element is judged here; a missing, empty or malformed
+    ``trusted_argv`` is still reported by the provider (it is not a launcher
+    problem, and v1 manifests must keep parsing).
+    """
+    if provider != "cred":
+        return
+    argv = body.get("trusted_argv")
+    if isinstance(argv, list) and argv and isinstance(argv[0], str) and is_launcher(argv[0]):
+        raise ManifestError(f"capability {cap_id!r}: options.trusted_argv {LAUNCHER_REFUSAL}")
 
 
 def _parse_v2(
@@ -376,6 +417,9 @@ def _parse_v2(
                 f"{list(ASSURANCE_LEVELS)} (got {raw_assurance!r})"
             )
         assurance = raw_assurance
+        problem = hidden_floor_problem(str(delivery["rung"]), assurance)
+        if problem is not None:
+            raise ManifestError(f"capability {cap_id!r}: assurance: {problem}")
 
     decision: str | None = None
     if "decision" in body:

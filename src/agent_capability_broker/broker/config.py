@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..model import ManifestError, resolve_manifest
+from ..model import ManifestError, hidden_floor_problem, resolve_manifest
 
 ISSUER_KINDS = frozenset({"fake", "vault-kv", "vault-k8s-token", "remote-mint"})
 RUNGS = frozenset({"helper", "proxy", "remote-op", "env"})
@@ -166,6 +166,12 @@ def _parse_issuer(cap_id: str, raw: object) -> IssuerSpec:
         params["mount"] = _vault_segment(
             str(raw.get("mount", "kubernetes")), where=where, key="mount"
         )
+        if "token_policies" in raw:
+            # Policies for the per-checkout child token (must be a subset of the
+            # broker's own); omitted = inherit the broker token's policies.
+            params["token_policies"] = list(
+                _str_list(raw["token_policies"], where=f"{where} token_policies")
+            )
         if "audiences" in raw:
             params["audiences"] = list(_str_list(raw["audiences"], where=f"{where} audiences"))
         if "cluster_role_binding" in raw and not isinstance(raw["cluster_role_binding"], bool):
@@ -219,6 +225,9 @@ def parse_broker_config(raw: dict[str, Any], *, source: Path | None = None) -> B
             raise BrokerConfigError(
                 f"capability {cap_id!r}: assurance must be one of {sorted(ASSURANCE_LEVELS)}"
             )
+        problem = hidden_floor_problem(delivery.rung, str(assurance))
+        if problem is not None:
+            raise BrokerConfigError(f"capability {cap_id!r}: assurance: {problem}")
         harnesses = (
             _str_list(body["harnesses"], where=f"capability {cap_id!r} harnesses")
             if "harnesses" in body

@@ -13,6 +13,7 @@ from enum import StrEnum
 from pathlib import Path, PureWindowsPath
 from typing import Protocol, cast
 
+from .launchers import LAUNCHER_REFUSAL, is_launcher
 from .model import Capability
 
 
@@ -59,14 +60,6 @@ _SUITE_PROVIDER_SCHEMES = frozenset({"vault", "azure", "windows"})
 _LITERAL_OPTION_NAMES = frozenset({"value", "values", "raw", "literal", "secret"})
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _MAX_TIMEOUT_SECONDS = 900.0
-# First elements of a trusted_argv that would let the holder run arbitrary code
-# with the injected value in its environment (Plan 012 section 5).
-_INTERPRETER_NAMES = frozenset({
-    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "busybox",
-    "pwsh", "powershell", "cmd", "node", "perl", "ruby", "env", "php", "lua",
-    "deno", "bun", "wscript", "cscript",
-})
-_INTERPRETER_PREFIXES = ("python", "pypy")
 
 
 def source_kind(cap: Capability) -> SecretSourceKind:
@@ -127,26 +120,17 @@ def _mapping(cap: Capability, name: str) -> dict[str, str]:
     return out
 
 
-def _is_interpreter(executable: str) -> bool:
-    """True when ``executable``'s basename is a shell or interpreter.
-
-    Matches the basename of either a POSIX or a Windows path, case-insensitively,
-    with a trailing ``.exe`` stripped (``C:\\Windows\\System32\\CMD.EXE`` -> ``cmd``).
-    """
-    base = PureWindowsPath(executable).name.lower()
-    if base.endswith(".exe"):
-        base = base[: -len(".exe")]
-    return base in _INTERPRETER_NAMES or base.startswith(_INTERPRETER_PREFIXES)
-
-
 def _trusted_argv(cap: Capability) -> tuple[str, ...]:
     """The capability's exact manifest-qualified child command.
 
     Required for **every** ``cred`` capability whatever its source (Plan 012
     section 5): without it ``acb exec cred:x -- env`` would hand the resolved
     value to an arbitrary caller-chosen command. The executable must be an
-    absolute path (PATH is never consulted) and may not be a shell or
-    interpreter. Pure validation -- no value is resolved.
+    absolute path (PATH is never consulted) and may not be a shell, interpreter
+    or exec wrapper (``launchers.is_launcher``; a lint guard against operator
+    mistakes, not a sandbox -- the exact full-argv match is the control). The
+    same rule runs at manifest parse time. Pure validation -- no value is
+    resolved.
     """
     raw = cap.options.get("trusted_argv")
     if not isinstance(raw, list) or not raw:
@@ -164,10 +148,9 @@ def _trusted_argv(cap: Capability) -> tuple[str, ...]:
         raise SecretSourceConfigError(
             f"{cap.id}: options.trusted_argv must name an absolute executable path"
         )
-    if _is_interpreter(executable):
+    if is_launcher(executable):
         raise SecretSourceConfigError(
-            f"{cap.id}: options.trusted_argv must not start with a shell or "
-            f"interpreter; name a reviewed purpose-built executable"
+            f"{cap.id}: options.trusted_argv {LAUNCHER_REFUSAL}"
         )
     return argv
 
