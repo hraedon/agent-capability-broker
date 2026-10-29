@@ -351,6 +351,13 @@ def authenticated_client(vault_env: str | os.PathLike[str] | None = None) -> obj
     `[cred]` extra, no `VAULT_ADDR`, no auth material); the message names
     variables and paths, never a value.
     """
+    # The address is checked before the extra: it is a property of the host's
+    # configuration that no install fixes, so "no address" is reported the same
+    # way whether or not hvac happens to be importable.
+    env = _vault_env(vault_env)
+    addr = env.get("VAULT_ADDR")
+    if not addr:
+        raise RuntimeError("VAULT_ADDR is not set")
     try:
         import hvac
     except ImportError as exc:
@@ -358,11 +365,6 @@ def authenticated_client(vault_env: str | os.PathLike[str] | None = None) -> obj
             "cred reachability needs the [cred] extra: "
             "pip install 'agent-capability-broker[cred]'"
         ) from exc
-
-    env = _vault_env(vault_env)
-    addr = env.get("VAULT_ADDR")
-    if not addr:
-        raise RuntimeError("VAULT_ADDR is not set")
 
     # `token=""` and NOT the default `None`: with `None`, hvac calls
     # `utils.get_token_from_env()`, which reads `$VAULT_TOKEN` *and*

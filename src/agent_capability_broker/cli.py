@@ -35,6 +35,7 @@ from .model import (
     resolve_manifest,
 )
 from .providers import PROVIDERS, E2eUnavailable, adapters, exec_composed
+from .secret_sources import SecretSourceConfigError, validate_cred_trusted_argv
 from .surface import ShimSurface, SurfaceFinding, audit_surface
 
 # zcode joined the stable set 2026-10-09 after its live interop proof
@@ -819,8 +820,8 @@ def _cmd_install_harness(args: argparse.Namespace) -> int:
 
 def _serialize_toml_value(value: str | list[str]) -> str:
     if isinstance(value, list):
-        return "[" + ", ".join(f'"{v}"' for v in value) + "]"
-    return f'"{value}"'
+        return "[" + ", ".join(json.dumps(v) for v in value) + "]"
+    return json.dumps(value)
 
 
 def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]]) -> str:
@@ -853,6 +854,19 @@ def _cmd_register(args: argparse.Namespace) -> int:
             )
             return 2
 
+    # Every cred capability runs only its exact trusted_argv (Plan 012 section 5):
+    # refuse to write an entry that could never exec.
+    try:
+        validate_cred_trusted_argv(
+            Capability(
+                cap_id, "cred", tuple(args.harnesses),
+                {"trusted_argv": list(args.trusted_argv)},
+            )
+        )
+    except SecretSourceConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     manifest_path = resolve_manifest(getattr(args, "manifest", None))
 
     existing: list[Capability] = []
@@ -883,6 +897,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
         options["env_prefix"] = args.env_prefix
     if args.vault_env:
         options["vault_env"] = args.vault_env
+    options["trusted_argv"] = list(args.trusted_argv)
     options["harnesses"] = args.harnesses
 
     entry = _serialize_capability_toml(cap_id, options)
@@ -1297,6 +1312,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="secret fields to expose (e.g. token, or username password)",
     )
     reg.add_argument("--env-prefix", help="env var prefix for injection (e.g. PYPI → PYPI_TOKEN)")
+    reg.add_argument(
+        "--trusted-argv", nargs=argparse.REMAINDER, required=True, metavar="ARG",
+        help="the exact command `acb exec` may run with this credential: an absolute "
+             "executable path (not a shell or interpreter) followed by its arguments; "
+             "must be the last option (everything after it is the command)",
+    )
     reg.add_argument(
         "--vault-env", help="per-plane AppRole .env file (for non-default access planes)"
     )

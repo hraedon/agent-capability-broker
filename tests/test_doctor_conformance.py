@@ -23,6 +23,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from _childpy import TRUSTED_TOML
 
 from agent_capability_broker.cli import _classify_health, _doctor_checks, main
 from agent_capability_broker.model import Status, Verdict
@@ -122,7 +123,7 @@ def _env_manifest(tmp_path: Path) -> Path:
     """A cred cap backed by an env source (no live Vault needed)."""
     m = tmp_path / "capabilities.toml"
     m.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_T"\nharnesses=["opencode"]\nassurance="D0"\n',
         encoding="utf-8",
     )

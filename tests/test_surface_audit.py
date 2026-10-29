@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from _childpy import TRUSTED_TOML
 
 from agent_capability_broker.adapters import ClaudeAdapter, OpencodeAdapter
 from agent_capability_broker.cli import main
@@ -196,7 +197,7 @@ def _doctor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("ACB_T", "set")
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_T"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )

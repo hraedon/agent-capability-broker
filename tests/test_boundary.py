@@ -411,6 +411,8 @@ def test_hvac_absent_is_unknown_with_the_install_hint(
     clean_vault_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setitem(sys.modules, "hvac", None)  # `import hvac` now raises ImportError
+    # The address is checked before the extra, so it must be set to reach the hint.
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.example.invalid")
     checks = _by_name(
         run_boundary_checks(BoundaryConfig(), environ={"PATH": "", "HOME": "/nonexistent"})
     )

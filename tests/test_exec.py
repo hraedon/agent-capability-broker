@@ -8,10 +8,10 @@ a live Vault; the Vault source shares the same injection path.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from _childpy import CHILD_PY, trusted_toml, trusting
 
 from agent_capability_broker.cli import main
 from agent_capability_broker.model import Capability
@@ -26,7 +26,7 @@ def _writer_argv(out: Path, var: str) -> list[str]:
         f"import os, pathlib; "
         f"pathlib.Path(r'{out}').write_text(os.environ.get({var!r}, 'MISSING'))"
     )
-    return [sys.executable, "-c", code]
+    return [CHILD_PY, "-c", code]
 
 
 def test_child_receives_secret_provider_stays_silent(
@@ -40,7 +40,8 @@ def test_child_receives_secret_provider_stays_silent(
         {"source": "env", "from_env": "SRC", "field": "password"},
     )
 
-    rc = CredProvider().exec(cap, _writer_argv(out, "PASSWORD"))
+    child = _writer_argv(out, "PASSWORD")
+    rc = CredProvider().exec(trusting(cap, child), child)
 
     assert rc == 0
     assert out.read_text() == SECRET            # child got the real secret
@@ -63,7 +64,8 @@ def test_inject_mapping_renames_env_var(
          "inject": {"password": "PGPASSWORD"}},
     )
 
-    CredProvider().exec(cap, _writer_argv(out, "PGPASSWORD"))
+    child = _writer_argv(out, "PGPASSWORD")
+    CredProvider().exec(trusting(cap, child), child)
     assert out.read_text() == SECRET
 
 
@@ -78,7 +80,7 @@ def test_provenance_has_no_secret(
         {"source": "env", "from_env": "SRC"},
     )
 
-    CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+    CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
     log = (state / "provenance.jsonl").read_text()
     # The bare path now emits started + terminal events (review F9 follow-up:
     # the bare path gained the same provenance discipline as the strict and
@@ -96,7 +98,7 @@ def test_provenance_has_no_secret(
 def test_missing_env_source_errors(tmp_path: Path) -> None:
     cap = Capability("cred:x", "cred", ("opencode",), {"source": "env", "from_env": "NOPE"})
     with pytest.raises(RuntimeError, match=r"NOPE"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_multi_field_exec_injects_each_and_stays_silent(
@@ -123,7 +125,7 @@ def test_multi_field_exec_injects_each_and_stays_silent(
         f"pathlib.Path(r'{out}').write_text("
         f"os.environ.get('USERNAME','?') + '|' + os.environ.get('PASSWORD','?'))"
     )
-    rc = CredProvider().exec(cap, [sys.executable, "-c", code])
+    rc = CredProvider().exec(trusting(cap, [CHILD_PY, "-c", code]), [CHILD_PY, "-c", code])
 
     assert rc == 0
     received = out.read_text()
@@ -141,13 +143,14 @@ def test_cli_exec_passes_child_exit_code(
 ) -> None:
     monkeypatch.setenv("SRC", SECRET)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    child = [CHILD_PY, "-c", "raise SystemExit(7)"]
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
         '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
         'from_env="SRC"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
-    child = [sys.executable, "-c", "raise SystemExit(7)"]
     rc = main(["exec", "-m", str(manifest), "cred:test", "--", *child])
     assert rc == 7
 
@@ -163,12 +166,13 @@ def test_cli_exec_manifest_after_capability(
     """
     monkeypatch.setenv("SRC", SECRET)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    child = [CHILD_PY, "-c", "raise SystemExit(0)"]
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
         '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
         'from_env="SRC"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
-    child = [sys.executable, "-c", "raise SystemExit(0)"]
     rc = main(["exec", "cred:test", "-m", str(manifest), "--", *child])
     assert rc == 0
