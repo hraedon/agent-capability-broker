@@ -75,11 +75,82 @@ harnesses  = ["claude", "opencode"]
 - `harnesses` lists which harnesses *should* expose this capability. `doctor`
   reports a capability as `NOT_APPLICABLE` for harnesses not listed.
 - Provider-specific keys (`vault`, `field`, `engine`, `backend`, …) are validated
-  by the provider, not the core. The core only understands `provider` and
-  `harnesses`.
+  by the provider, not the core. The core understands `provider`, `harnesses`
+  and the v2 keys below (`issuer`, `delivery`, `assurance`, `decision`), plus the
+  optional manifest-level `[boundary]` table.
 - The manifest contains **no secrets** — only references (a Vault path, a browser
   engine). It is safe to commit *as an example with placeholders*; a real estate
   manifest pointing at real Vault paths is treated like a config and gitignored.
+
+### Manifest v2: delivery, issuer and assurance (Plan 012 §5)
+
+The trust boundary is the agent VM, so every capability should either *hide* its
+value (it never enters the VM) or *devalue* it (issued per use, scoped,
+short-lived, revocable). v2 lets the manifest say which, and `doctor` checks the
+claim. Every key is optional and additive; a v1 entry stays valid.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `issuer` | table; `kind` (non-empty string) required | What mints or holds the credential. Other keys (`mount`, `role`, `ttl`, `scopes`, …) are kept verbatim and not judged by the core. |
+| `delivery` | table; `rung` required | How it reaches the tool. `rung` is one of `helper` (native credential helper), `proxy` (in-VM egress proxy), `remote-op` (typed operation run off the VM), `env` (injection; compatibility only). Other keys (`tool`, `hosts`, `operation`, …) are kept verbatim. |
+| `assurance` | `D0`, `D1`, `H1` or `H1+D1` | The **declared floor**: the weakest level the operator accepts for this capability. |
+| `decision` | `auto`, `approve` or `deny` | Off-VM policy tier. Valid **only** when `delivery.rung = "remote-op"` (an in-VM rung cannot enforce it); anything else is a `ManifestError`. |
+| `harnesses` | non-empty list | Unchanged, but now **advisory**: the VM, not the harness, is the boundary. |
+
+Type and enum violations are ordinary `ManifestError`s, the same path as every
+other core-contract failure. Unknown `issuer.kind` values are accepted (the
+`issuer` table is extensible) but credited as non-issuing by the derivation
+below.
+
+**Lossless v1 upconvert.** An entry with none of the four keys is read as
+`delivery = {rung = "env"}`, no issuer, and `assurance = "D0"`. Nothing is
+dropped: every other key stays in `Capability.options` for the provider. The
+parsed `Capability` keeps the *declared* floor separately from the upconverted
+`D0` so `doctor` can tell an acknowledged `D0` from an unexamined one.
+
+#### Assurance levels
+
+| Level | Meaning |
+|---|---|
+| `D0` | A standing secret is present in the VM. |
+| `D1` | Devalued: issued, scoped, short-lived, revocable. |
+| `H1` | Hidden: the value never enters the VM. |
+| `H1+D1` | Both. |
+
+Ordering for floor comparison is `D0 < D1 < H1 < H1+D1`.
+
+**Effective assurance** is derived, never trusted from the manifest, by one pure
+function (`model.derive_assurance`):
+
+| Delivery rung | Issuer | Effective |
+|---|---|---|
+| `remote-op` | issuing kind | `H1+D1` |
+| `remote-op` | none, static, or unlisted kind | `H1` |
+| `helper`, `proxy` or `env` | issuing kind | `D1` |
+| `helper`, `proxy` or `env` | none, `vault-kv`, or unlisted kind | `D0` |
+
+Issuing kinds: `vault-ssh-ca`, `vault-k8s-token`, `vault-ldap-library`,
+`vault-ldap-static`, `vault-database`, `vault-pki`, `remote-mint`. `vault-kv` is
+static. The derivation reads only the manifest entry; it makes no probe.
+
+`doctor` emits one `<capability>@assurance` check per credential-bearing
+capability (every `cred`, plus any capability declaring a v2 key):
+
+| Condition | Status |
+|---|---|
+| effective level below the declared floor | `fail` |
+| effective `D0`, no floor declared | `warn` (honest, never a pass) |
+| effective `D0`, floor declared `D0` | `ok` (acknowledged) |
+| otherwise | `ok` |
+
+```toml
+[capability."cred:forge-agent"]
+provider  = "cred"
+issuer    = { kind = "remote-mint", scopes = ["write:repository"], ttl = "15m" }
+delivery  = { rung = "helper", tool = "git" }
+assurance = "D1"
+harnesses = ["claude", "codex", "opencode"]    # advisory
+```
 
 ## 4. Status
 
@@ -223,6 +294,40 @@ This boundary is the project's core safety property. The read path is as safe as
 any lens sibling; the act path is where `acb` earns its "not read-only"
 asterisk, and every rule on it exists to keep a brokered secret or a generated
 config from doing harm or leaking.
+
+### `acb doctor --boundary` (read-only)
+
+The blast-radius rule (Plan 011 §3): **the agent VM holds no credential that
+administers anything that guards or issues secrets.** `--boundary` adds checks
+for what can be verified from inside the VM, to the normal report (same
+`ok`/`warn`/`fail` vocabulary and exit code: non-zero on any `fail`). Every
+probe is a policy *question*; none reads or uses a secret, and no output carries
+a token, certificate or kubeconfig content. Subprocesses run without a shell,
+with a timeout and a minimal environment.
+
+Optional manifest-level table (unknown keys are refused so a typo cannot silently
+disable a check):
+
+```toml
+[boundary]
+vault_namespace   = "example-vault"                # Kubernetes namespace of the secret store
+ssh_admin_targets = ["hypervisor-01.example.invalid"]
+```
+
+| Check | Verdict |
+|---|---|
+| `boundary.kubeconfig.cluster-admin`: `kubectl auth can-i '*' '*' --all-namespaces` | `yes` is `fail`, `no` is `ok` |
+| `boundary.kubeconfig.vault-secrets` / `.vault-exec`: `can-i get secrets` / `create pods/exec` with `-n <vault_namespace>` (only when `vault_namespace` is set) | `yes` is `fail`, `no` is `ok` |
+| `boundary.kubeconfig.mode` (POSIX): kubeconfig file mode | wider than `0600` is `warn` |
+| `boundary.vault-identity`: `sys/capabilities-self` on `sys/policies/acl/x`, `auth/x`, `identity/x`, `sys/mounts`, through the cred provider's client (`token=""`, fail closed, never an ambient token) | any capability other than `deny` is `fail` |
+| `boundary.ssh-admin:<host>` for each `ssh_admin_targets` entry | always `unknown`: "checked by hand" (acb never attempts SSH) |
+
+`unknown` means the check could not run (no `kubectl`, no kubeconfig, cluster or
+Vault unreachable, the `[cred]` extra absent, no auth material); it carries the
+reason and renders as the suite `warn`, exactly as `Status.UNKNOWN` does for a
+capability cell. It never crashes the report. Only the identity found by default
+resolution (the process environment and the default Vault env file) is probed;
+per-harness access planes are not enumerated.
 
 ### Suite child-output and checkout-receipt boundary
 

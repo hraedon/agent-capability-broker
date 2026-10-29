@@ -339,19 +339,17 @@ def _split_mount(path: str) -> tuple[str, str]:
     return head, tail
 
 
-def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = None) -> bool:
-    """Read-only broker reachability: authenticate, then a **token self-lookup**
-    only — never reads the capability's secret (that would be a *use*, spine §4).
+def authenticated_client(vault_env: str | os.PathLike[str] | None = None) -> object:
+    """An hvac client logged in by the resolved access plane, or ``RuntimeError``.
 
-    `vault_env` pins the probe to a specific access-plane `.env` — `doctor` passes
-    the capability's *declared* plane (the same file its shim embeds) so a
-    multi-plane estate is checked per-plane instead of all capabilities being
-    probed through whatever single `ACB_VAULT_ENV` the shell happens to hold
-    (WI-008: that single-env probe over-claimed PRESENT_OK across planes).
+    The one place a read-path probe builds a Vault client, so every probe keeps
+    the two WI-016 invariants: the client is constructed with ``token=""`` (never
+    ``None`` -- hvac would otherwise read ``$VAULT_TOKEN`` and ``~/.vault-token``)
+    and declared-but-incomplete AppRole material fails closed in `_authenticate`.
 
-    Raises `RuntimeError` when reachability cannot be determined (no `[cred]`
-    extra, no `VAULT_ADDR`, or auth fails) so the caller maps it to `UNKNOWN`
-    rather than over-claiming a verdict.
+    Raises `RuntimeError` when a client cannot be built or authenticated (no
+    `[cred]` extra, no `VAULT_ADDR`, no auth material); the message names
+    variables and paths, never a value.
     """
     try:
         import hvac
@@ -370,10 +368,81 @@ def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = Non
     # `utils.get_token_from_env()`, which reads `$VAULT_TOKEN` *and*
     # `~/.vault-token`. A stray developer token in the home directory would then
     # let this report a capability REACHABLE on a host that is supposed to be
-    # AppRole-only — the runtime half of the trap WI-015 closed in `onboard`.
+    # AppRole-only -- the runtime half of the trap WI-015 closed in `onboard`.
     client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN") or "")
     _authenticate(client, env, source=_auth_source(env, vault_env))
-    return bool(client.is_authenticated())  # token self-lookup; no secret read
+    return client
+
+
+def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = None) -> bool:
+    """Read-only broker reachability: authenticate, then a **token self-lookup**
+    only — never reads the capability's secret (that would be a *use*, spine §4).
+
+    `vault_env` pins the probe to a specific access-plane `.env` — `doctor` passes
+    the capability's *declared* plane (the same file its shim embeds) so a
+    multi-plane estate is checked per-plane instead of all capabilities being
+    probed through whatever single `ACB_VAULT_ENV` the shell happens to hold
+    (WI-008: that single-env probe over-claimed PRESENT_OK across planes).
+
+    Raises `RuntimeError` when reachability cannot be determined (no `[cred]`
+    extra, no `VAULT_ADDR`, or auth fails) so the caller maps it to `UNKNOWN`
+    rather than over-claiming a verdict.
+    """
+    client = authenticated_client(vault_env)
+    return bool(client.is_authenticated())  # type: ignore[attr-defined]  # token self-lookup
+
+
+def capabilities_self(
+    paths: list[str],
+    *,
+    vault_env: str | os.PathLike[str] | None = None,
+    client: object | None = None,
+) -> dict[str, list[str]]:
+    """What the broker's own identity may do on each of `paths` (read-only).
+
+    Calls ``sys/capabilities-self`` -- a policy introspection of the caller's own
+    token, not a read or write of any secret -- and returns ``{path: [capability,
+    ...]}``. ``client`` is an already-authenticated client (tests inject a fake;
+    production builds one via `authenticated_client`, which carries the WI-016
+    invariants).
+
+    Raises `RuntimeError` when the client cannot be built, the call fails, or the
+    reply does not cover every requested path -- the caller maps that to
+    "unknown" rather than over-claiming a clean result. Exception text from the
+    transport is reduced to its type name (it can embed addresses).
+    """
+    if client is None:
+        client = authenticated_client(vault_env)
+    try:
+        reply = client.sys.get_capabilities(paths)  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise RuntimeError(
+            f"sys/capabilities-self failed ({type(exc).__name__})"
+        ) from exc
+    # Vault returns the per-path map at the top level and again under "data";
+    # older single-path replies use a bare "capabilities" list.
+    scopes: list[dict[str, object]] = []
+    if isinstance(reply, dict):
+        scopes.append(reply)
+        data = reply.get("data")
+        if isinstance(data, dict):
+            scopes.append(data)
+    out: dict[str, list[str]] = {}
+    for path in paths:
+        caps: object = None
+        for scope in scopes:
+            if path in scope:
+                caps = scope[path]
+                break
+        if caps is None and len(paths) == 1:
+            for scope in scopes:
+                if "capabilities" in scope:
+                    caps = scope["capabilities"]
+                    break
+        if not isinstance(caps, list) or not all(isinstance(c, str) for c in caps):
+            raise RuntimeError(f"sys/capabilities-self reply did not cover {path!r}")
+        out[path] = [str(c) for c in caps]
+    return out
 
 
 def resolve(cap: Capability) -> dict[str, str]:

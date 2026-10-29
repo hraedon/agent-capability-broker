@@ -123,7 +123,7 @@ def _env_manifest(tmp_path: Path) -> Path:
     m = tmp_path / "capabilities.toml"
     m.write_text(
         '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
-        'from_env="ACB_T"\nharnesses=["opencode"]\n',
+        'from_env="ACB_T"\nharnesses=["opencode"]\nassurance="D0"\n',
         encoding="utf-8",
     )
     return m
@@ -140,6 +140,7 @@ def _harness_env(
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(tmp_path / "no-hermes.yaml"))
     monkeypatch.setenv("ACB_ZCODE_CONFIG", str(tmp_path / "no-zcode.json"))
+    monkeypatch.setenv("ACB_CODEX_HOME", str(tmp_path / "no-codex"))
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
     return root
 
