@@ -9,11 +9,11 @@ and that a conforming fake launcher round-trips correctly through acb exec.
 from __future__ import annotations
 
 import json
-import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+from _childpy import CHILD_PY
 
 from agent_capability_broker import secret_sources
 from agent_capability_broker.launcher_contract import (
@@ -121,7 +121,7 @@ def _launcher_cap(launcher_path: str) -> Capability:
                 "password": "vault:kv/example/lab/password",
             },
             "inject": {"username": "LAB_USERNAME", "password": "LAB_PASSWORD"},
-            "trusted_argv": [sys.executable, launcher_path],
+            "trusted_argv": [CHILD_PY, launcher_path],
         },
     )
 
@@ -301,7 +301,7 @@ class TestFakeLauncherConformance:
 
         launcher_script = tmp_path / "fake_launcher.py"
         launcher_script.write_text(FAKE_LAUNCHER_SOURCE)
-        argv = [sys.executable, str(launcher_script)]
+        argv = [CHILD_PY, str(launcher_script)]
         cap = _launcher_cap(str(launcher_script))
 
         rc = CredProvider().exec(cap, argv)
@@ -337,7 +337,7 @@ class TestFakeLauncherConformance:
 
         launcher_script = tmp_path / "fake_launcher.py"
         launcher_script.write_text(FAKE_LAUNCHER_SOURCE)
-        argv = [sys.executable, str(launcher_script)]
+        argv = [CHILD_PY, str(launcher_script)]
         cap = _launcher_cap(str(launcher_script))
 
         CredProvider().exec(cap, argv)
@@ -379,7 +379,7 @@ class TestFakeLauncherConformance:
 
         checker = tmp_path / "checker.py"
         checker.write_text(checker_source)
-        checker_argv = [sys.executable, str(checker), str(launcher_script)]
+        checker_argv = [CHILD_PY, str(checker), str(launcher_script)]
         cap = Capability(
             "cred:lab-control",
             "cred",

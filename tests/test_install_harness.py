@@ -14,6 +14,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from _childpy import TRUSTED_TOML
 
 from agent_capability_broker.cli import main
 
@@ -38,7 +39,7 @@ def _setup_oc(
 def _cred_manifest(tmp_path: Path) -> Path:
     m = tmp_path / "capabilities.toml"
     m.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
@@ -143,7 +144,7 @@ def _setup_codex(
 def _codex_cred_manifest(tmp_path: Path) -> Path:
     m = tmp_path / "capabilities.toml"
     m.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["codex"]\n',
         encoding="utf-8",
     )
@@ -326,7 +327,7 @@ def test_requested_unavailable_adapter_unknown_is_nonzero(
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["claude"]\n',
         encoding="utf-8",
     )
@@ -394,7 +395,7 @@ def test_install_harness_only_provisions_named_harness(
 
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["claude", "opencode"]\n',
         encoding="utf-8",
     )
@@ -515,9 +516,9 @@ def test_install_harness_multiple_capabilities(
 
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:cred-a"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:cred-a"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET_A"\nharnesses=["opencode"]\n'
-        '[capability."cred:cred-b"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:cred-b"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET_B"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )

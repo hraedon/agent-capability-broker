@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from _childpy import CHILD_PY, trusting
 
 from agent_capability_broker import providers, secret_sources
 from agent_capability_broker.model import Capability, Status
@@ -109,16 +109,28 @@ class TestWindowsTrustedArgv:
             )
         assert fake.resolve_calls == []
 
-    def test_shell_as_trusted_argv_is_not_code_rejected(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "shell",
+        [
+            r"C:\Windows\System32\cmd.exe",
+            r"C:\Windows\System32\CMD.EXE",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "/bin/sh",
+        ],
+    )
+    def test_shell_as_trusted_argv_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, shell: str
     ) -> None:
+        """Plan 012 section 5: a shell/interpreter can never be the qualified child,
+        whatever the source (it would run arbitrary code with the value injected)."""
         fake = FakeResolver()
         _install_fake(monkeypatch, fake)
-        shell = r"C:\Windows\System32\cmd.exe"
         cap = _windows_cap(trusted_argv=[shell, "/c", "echo hello"])
         from agent_capability_broker.secret_sources import validate_suite_command
 
-        validate_suite_command(cap, [shell, "/c", "echo hello"])
+        with pytest.raises(SecretSourceConfigError, match="shell or interpreter"):
+            validate_suite_command(cap, [shell, "/c", "echo hello"])
+        assert fake.resolve_calls == []
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX paths are not absolute on Windows")
     def test_accepts_posix_absolute_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -401,7 +413,7 @@ class TestWindowsRedactedFailures:
         )
         _install_fake(monkeypatch, fake)
         monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
-        argv = [sys.executable, "-c", "pass"]
+        argv = [CHILD_PY, "-c", "pass"]
         cap = _windows_cap(
             refs={
                 "username": "windows:credential/example/lab/username",
@@ -413,7 +425,7 @@ class TestWindowsRedactedFailures:
         from agent_capability_broker.secret_sources import SecretResolutionError
 
         with pytest.raises(SecretResolutionError) as exc_info:
-            CredProvider().exec(cap, argv)
+            CredProvider().exec(trusting(cap, argv), argv)
         rendered = str(exc_info.value)
         assert sensitive_ref not in rendered
         assert PASS_CANARY not in rendered
@@ -440,10 +452,10 @@ class TestWindowsProvenance:
         monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
         out = tmp_path / "out.txt"
         code = f"import pathlib; pathlib.Path({str(out)!r}).write_text('ok')"
-        argv = [sys.executable, "-c", code]
+        argv = [CHILD_PY, "-c", code]
         cap = _windows_cap(trusted_argv=argv)
 
-        assert CredProvider().exec(cap, argv) == 0
+        assert CredProvider().exec(trusting(cap, argv), argv) == 0
         log = (tmp_path / "state" / "provenance.jsonl").read_text()
         events = [json.loads(line) for line in log.splitlines()]
         assert len(events) == 2
@@ -474,9 +486,9 @@ class TestWindowsProvenance:
         monkeypatch.setenv("SSH_CONNECTION", "192.168.1.100 54321 192.168.1.50 22")
         monkeypatch.setenv("SSH_CLIENT", "192.168.1.100 54321 22")
 
-        argv = [sys.executable, "-c", "pass"]
+        argv = [CHILD_PY, "-c", "pass"]
         cap = _windows_cap(trusted_argv=argv)
-        assert CredProvider().exec(cap, argv) == 0
+        assert CredProvider().exec(trusting(cap, argv), argv) == 0
 
         log = (tmp_path / "state" / "provenance.jsonl").read_text()
         assert USER_CANARY not in log
@@ -536,7 +548,7 @@ class TestNoConsoleWindowFlash:
         )
         _install_fake(monkeypatch, fake)
         monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
-        argv = [sys.executable, "-c", "pass"]
+        argv = [CHILD_PY, "-c", "pass"]
         cap = _windows_cap(
             refs={
                 "username": "windows:credential/example/lab/username",
@@ -555,7 +567,7 @@ class TestNoConsoleWindowFlash:
             return real_popen(*args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(providers.subprocess, "Popen", spy_popen)
-        assert CredProvider().exec(cap, argv) == 0
+        assert CredProvider().exec(trusting(cap, argv), argv) == 0
 
         # Unconditional so the assertion holds off Windows too: every spawn site
         # passes the same helper, whose value is None where it is a no-op.

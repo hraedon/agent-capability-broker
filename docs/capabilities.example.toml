@@ -26,12 +26,15 @@ harnesses = ["claude", "opencode"]
 # WI-010: declared naming contract for the vault source. env_prefix names the
 # fields EXAMPLE_CONTROL_USERNAME / EXAMPLE_CONTROL_PASSWORD so two
 # [username, password] capabilities compose in one checkout:
-#   acb exec cred:example-control cred:example-guest -- <command> [args...]
+#   acb exec cred:example-control cred:example-guest -- <exact trusted_argv>
+# Every cred capability needs an exact trusted_argv (absolute path, not a shell
+# or interpreter); composing requires the same argv on each capability.
 [capability."cred:example-control"]
 provider   = "cred"
 vault      = "kv/example/lab/control"
 fields     = ["username", "password"]
 env_prefix = "EXAMPLE_CONTROL"         # or inject = { username = "EX_USER", password = "EX_PASS" }
+trusted_argv = ["/opt/example/bin/lab-control", "--check"]
 harnesses  = ["claude", "opencode"]
 
 [capability."cred:example-guest"]
@@ -39,4 +42,5 @@ provider   = "cred"
 vault      = "kv/example/lab/guest"
 fields     = ["username", "password"]
 env_prefix = "EXAMPLE_GUEST"
+trusted_argv = ["/opt/example/bin/lab-control", "--check"]
 harnesses  = ["claude", "opencode"]

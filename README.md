@@ -104,12 +104,13 @@ and reconciles reality to it.
   path** (`reconcile`/`exec`) mutates configs and injects secrets: it is
   **dry-run by default**, backs up before writing, never clobbers an existing
   secret, and emits provenance on every action.
-- **Inject, don't surface.** `acb exec cred:svc-bot -- ./script` injects the
+- **Inject, don't surface.** `acb exec cred:svc-bot -- <its trusted_argv>` injects the
   secret into the child process. ACB never emits the value itself, but the child
-  inherits stdout/stderr and can emit or transform it. Suite manifests therefore
-  require an exact absolute `trusted_argv`, minimal environment, and bounded
-  process-tree timeout; the purpose-built child remains part of the qualified
-  trust boundary. Timeout/interruption terminates the owned POSIX session or
+  inherits stdout/stderr and can emit or transform it. Every `cred` capability
+  therefore requires an exact absolute `trusted_argv` (never a shell or
+  interpreter; any other command is refused before a value is resolved), and
+  suite manifests add a minimal environment and bounded process-tree timeout;
+  the purpose-built child remains part of the qualified trust boundary. Timeout/interruption terminates the owned POSIX session or
   Windows process tree; Windows fails closed if its containment tools are absent.
 - **Provider-neutral suite refs.** `source = "suite"` maps explicit `vault:`,
   `azure:`, or `windows:` refs to named child environment variables through

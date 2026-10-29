@@ -69,6 +69,7 @@ provider   = "cred"
 vault      = "kv/example/lab/control"
 fields     = ["username", "password"]
 env_prefix = "EXAMPLE_CONTROL"            # or inject = { username = "...", ... }
+trusted_argv = ["/opt/example/bin/lab-control", "--check"]   # required for every cred
 harnesses  = ["claude", "opencode"]
 ```
 
@@ -132,9 +133,14 @@ First two providers:
   provider-neutral `source = "suite"`. Suite refs are explicit `vault:`,
   `azure:`, or `windows:` references resolved through the optional public
   `regista.secrets` facade. Doctor validates wiring and provider availability
-  but never resolves a value. Suite execution additionally requires an absolute
-  `trusted_argv` whose complete argv must match exactly before resolution. ACB
-  supplies a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
+  but never resolves a value. **Every** `cred` capability, whatever its source,
+  requires an absolute `trusted_argv` whose complete argv must match the
+  `acb exec` command exactly before any value is resolved (Plan 012 section 5); its first
+  element may not be a shell or interpreter (`sh`, `bash`, `zsh`, `dash`, `pwsh`,
+  `powershell`, `cmd`, `python*`, `node`, `perl`, `ruby`, `env`). A missing or
+  interpreter-first `trusted_argv` is a failing `doctor` check, and
+  `acb exec cred:x -- env` is refused before Vault is contacted. Suite execution
+  additionally gets a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
   the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`, where
   AppRole strictly precedes the token and **declared-but-incomplete AppRole
   material refuses** rather than downgrading to a token (WI-016; the plane
@@ -224,9 +230,9 @@ any lens sibling; the act path is where `acb` earns its "not read-only"
 asterisk, and every rule on it exists to keep a brokered secret or a generated
 config from doing harm or leaking.
 
-### Suite child-output and checkout-receipt boundary
+### Qualified-child output and checkout-receipt boundary
 
-`source = "suite"` does not make an arbitrary child safe. ACB never writes the
+No credential source makes an arbitrary child safe. ACB never writes the
 resolved value to its own stdout/stderr, argv, error, or provenance, but the
 qualified child receives it and inherits the operator's stdout/stderr. That
 child can print, transform, or exfiltrate the value. Therefore the complete,
@@ -293,7 +299,7 @@ Two deliberate behavior notes:
 **Composed checkout** runs one command with several capabilities at once:
 
 ```
-acb exec cred:example-control cred:example-guest -- <command> [args...]
+acb exec cred:example-control cred:example-guest -- <exact trusted_argv>
 ```
 
 All capabilities resolve from the invoking access plane (one `ACB_VAULT_ENV`),
@@ -301,7 +307,9 @@ inject under their declared names, and share a single receipt whose
 `checkouts` array covers every capability in order. This replaces nested
 `acb exec` shells that re-export values by hand — the pattern that moved
 secret handling back into ad-hoc shell. Only non-suite cred capabilities
-compose; the suite source keeps its dedicated exact-command trust model.
+compose; the suite source keeps its dedicated resolution model. The one
+command must equal **every** composed capability's `trusted_argv`, so a child
+is only handed values by capabilities that qualified it.
 Per-capability access-plane routing at exec time (two planes in one composed
 checkout) remains open.
 

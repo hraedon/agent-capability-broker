@@ -59,6 +59,14 @@ _SUITE_PROVIDER_SCHEMES = frozenset({"vault", "azure", "windows"})
 _LITERAL_OPTION_NAMES = frozenset({"value", "values", "raw", "literal", "secret"})
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _MAX_TIMEOUT_SECONDS = 900.0
+# First elements of a trusted_argv that would let the holder run arbitrary code
+# with the injected value in its environment (Plan 012 section 5).
+_INTERPRETER_NAMES = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "busybox",
+    "pwsh", "powershell", "cmd", "node", "perl", "ruby", "env", "php", "lua",
+    "deno", "bun", "wscript", "cscript",
+})
+_INTERPRETER_PREFIXES = ("python", "pypy")
 
 
 def source_kind(cap: Capability) -> SecretSourceKind:
@@ -119,11 +127,32 @@ def _mapping(cap: Capability, name: str) -> dict[str, str]:
     return out
 
 
+def _is_interpreter(executable: str) -> bool:
+    """True when ``executable``'s basename is a shell or interpreter.
+
+    Matches the basename of either a POSIX or a Windows path, case-insensitively,
+    with a trailing ``.exe`` stripped (``C:\\Windows\\System32\\CMD.EXE`` -> ``cmd``).
+    """
+    base = PureWindowsPath(executable).name.lower()
+    if base.endswith(".exe"):
+        base = base[: -len(".exe")]
+    return base in _INTERPRETER_NAMES or base.startswith(_INTERPRETER_PREFIXES)
+
+
 def _trusted_argv(cap: Capability) -> tuple[str, ...]:
+    """The capability's exact manifest-qualified child command.
+
+    Required for **every** ``cred`` capability whatever its source (Plan 012
+    section 5): without it ``acb exec cred:x -- env`` would hand the resolved
+    value to an arbitrary caller-chosen command. The executable must be an
+    absolute path (PATH is never consulted) and may not be a shell or
+    interpreter. Pure validation -- no value is resolved.
+    """
     raw = cap.options.get("trusted_argv")
     if not isinstance(raw, list) or not raw:
         raise SecretSourceConfigError(
-            f"{cap.id}: source 'suite' requires a non-empty options.trusted_argv list"
+            f"{cap.id}: options.trusted_argv is required for every cred capability "
+            f"(a non-empty list naming the exact child command)"
         )
     if any(not isinstance(part, str) or not part for part in raw):
         raise SecretSourceConfigError(
@@ -135,16 +164,30 @@ def _trusted_argv(cap: Capability) -> tuple[str, ...]:
         raise SecretSourceConfigError(
             f"{cap.id}: options.trusted_argv must name an absolute executable path"
         )
+    if _is_interpreter(executable):
+        raise SecretSourceConfigError(
+            f"{cap.id}: options.trusted_argv must not start with a shell or "
+            f"interpreter; name a reviewed purpose-built executable"
+        )
     return argv
 
 
-def validate_suite_command(cap: Capability, argv: list[str]) -> None:
-    """Require the exact pre-qualified child command before touching a value."""
+def validate_cred_trusted_argv(cap: Capability) -> tuple[str, ...]:
+    """Validate a cred capability's ``trusted_argv`` declaration (any source)."""
+    return _trusted_argv(cap)
+
+
+def validate_exec_command(cap: Capability, argv: list[str]) -> None:
+    """Require the exact manifest-qualified command before touching a value."""
     trusted = _trusted_argv(cap)
     if tuple(argv) != trusted:
         raise SecretSourceConfigError(
             f"{cap.id}: requested command does not match options.trusted_argv"
         )
+
+
+# Historical name from when only ``source = "suite"`` was qualified.
+validate_suite_command = validate_exec_command
 
 
 def _timeout_seconds(cap: Capability) -> float:
@@ -271,5 +314,7 @@ __all__ = [
     "resolve_suite",
     "source_kind",
     "suite_spec",
+    "validate_cred_trusted_argv",
+    "validate_exec_command",
     "validate_suite_command",
 ]
