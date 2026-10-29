@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -32,6 +33,18 @@ from agent_capability_broker.secret_sources import (
 )
 
 SECRET = "vault-secret-canary-31c9"
+
+
+def _abs(path: str) -> str:
+    """``path`` made absolute on *this* platform.
+
+    A POSIX-style ``/usr/bin/x`` is not absolute on Windows (no drive), so the
+    absolute-path rule would fire before the shell/interpreter rule these tests
+    exercise. ``os.path.abspath`` adds the current drive there and is the
+    identity on POSIX. Windows-style paths are returned untouched.
+    """
+    return os.path.abspath(path) if path.startswith("/") else path
+
 
 # argv a prompt-injected agent would try against a vault cred.
 REFUSED_COMMANDS = [
@@ -310,6 +323,8 @@ def test_relative_trusted_argv_is_a_manifest_error() -> None:
         "/usr/bin/python3.14t", "/usr/local/bin/pythonw",
         "/BIN/BASH", "/usr/bin/Python3",
         r"C:\Windows\System32\cmd.exe", r"C:\Windows\System32\CMD.EXE",
+        r"C:\Program Files\Git\usr\bin\bash.exe", r"C:\Program Files\Git\bin\sh.exe",
+        r"C:\Python312\PYTHON.EXE", r"C:\Python312\python3.12.exe",
         r"C:\Program Files\PowerShell\7\pwsh.exe",
         r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
         r"C:\Python314\python.exe", r"C:\Program Files\nodejs\node.exe",
@@ -317,6 +332,7 @@ def test_relative_trusted_argv_is_a_manifest_error() -> None:
     ],
 )
 def test_interpreter_first_trusted_argv_is_a_manifest_error(executable: str) -> None:
+    executable = _abs(executable)
     cap = _vault_cap(trusted_argv=[executable, "-c", "anything"])
 
     with pytest.raises(SecretSourceConfigError, match="shell or interpreter"):
@@ -336,6 +352,7 @@ def test_interpreter_first_trusted_argv_is_a_manifest_error(executable: str) -> 
     ],
 )
 def test_purpose_built_executables_are_accepted(executable: str) -> None:
+    executable = _abs(executable)
     cap = _vault_cap(trusted_argv=[executable, "--validate"])
 
     assert validate_cred_trusted_argv(cap) == (executable, "--validate")
@@ -344,7 +361,7 @@ def test_purpose_built_executables_are_accepted(executable: str) -> None:
 
 def test_interpreter_check_only_looks_at_the_first_element() -> None:
     # An interpreter-named *argument* of a purpose-built tool is fine.
-    cap = _vault_cap(trusted_argv=["/opt/example/bin/runner", "--shell", "bash"])
+    cap = _vault_cap(trusted_argv=[_abs("/opt/example/bin/runner"), "--shell", "bash"])
 
     validate_cred_trusted_argv(cap)
 
@@ -385,7 +402,7 @@ def _doctor_checks_for(manifest: Path, monkeypatch: pytest.MonkeyPatch, tmp_path
     ("body", "message"),
     [
         ("", "trusted_argv is required"),
-        (trusted_toml(["/bin/sh", "-c", "true"]), "shell or interpreter"),
+        (trusted_toml([_abs("/bin/sh"), "-c", "true"]), "shell or interpreter"),
         (trusted_toml(["relative-tool"]), "absolute"),
     ],
 )
@@ -424,7 +441,7 @@ def test_inspect_and_reconcile_report_a_bad_trusted_argv(
     tmp_path: Path, no_secret_touched: list[str]
 ) -> None:
     adapter = OpencodeAdapter(config_path=tmp_path / "opencode.json")
-    cap = _vault_cap(trusted_argv=["/bin/sh"])
+    cap = _vault_cap(trusted_argv=[_abs("/bin/sh")])
 
     verdict = CredProvider().inspect(cap, "opencode", adapter)
     plan = CredProvider().plan_reconcile(cap, "opencode", adapter)
@@ -486,7 +503,7 @@ def test_register_refuses_an_interpreter(
 
     rc = main([
         "register", "cred:newbot", "--vault", "kv/example/lab/newbot", "--fields", "token",
-        "--harnesses", "claude", "--apply", "--trusted-argv", "/bin/bash", "-c", "x",
+        "--harnesses", "claude", "--apply", "--trusted-argv", _abs("/bin/bash"), "-c", "x",
     ])
 
     assert rc == 2

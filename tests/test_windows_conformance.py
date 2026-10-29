@@ -115,6 +115,9 @@ class TestWindowsTrustedArgv:
             r"C:\Windows\System32\cmd.exe",
             r"C:\Windows\System32\CMD.EXE",
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Python312\python.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
             "/bin/sh",
         ],
     )
@@ -123,6 +126,11 @@ class TestWindowsTrustedArgv:
     ) -> None:
         """Plan 012 section 5: a shell/interpreter can never be the qualified child,
         whatever the source (it would run arbitrary code with the value injected)."""
+        # A POSIX-style path has no drive, so it is only "absolute" on POSIX;
+        # make it absolute here so the shell rule (not the absolute-path rule)
+        # is what is exercised on every platform.
+        if shell.startswith("/"):
+            shell = os.path.abspath(shell)
         fake = FakeResolver()
         _install_fake(monkeypatch, fake)
         cap = _windows_cap(trusted_argv=[shell, "/c", "echo hello"])
@@ -524,10 +532,10 @@ class TestNoConsoleWindowFlash:
     def test_startupinfo_is_none_off_windows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        class _PosixOs:
-            name = "posix"
+        class _PosixSys:
+            platform = "linux"
 
-        monkeypatch.setattr(providers, "os", _PosixOs())
+        monkeypatch.setattr(providers, "sys", _PosixSys())
         assert providers._child_startupinfo() is None
 
     @pytest.mark.skipif(os.name != "nt", reason="STARTUPINFO exists only on Windows")
