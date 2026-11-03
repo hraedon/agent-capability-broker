@@ -9,3 +9,11 @@ Tested source `507b38b2405a591b0e0ba2aec0b4bbc7a622953d`, based on `5f67fef1f002
 - `git diff --check` passed.
 
 The synthetic adapter tests verify HVAC request construction and response handling, not a live Vault server, the operator's token, policy grant, or installed package. No real Vault call, credential read or installed-environment mutation was performed. Independent review and the native work-item gate remain pending.
+
+## Accepted source and local runtime qualification
+
+Actual independent Google security/general review and the native gate accepted `118718e3bd31b62dc447535d407c2cc41794d522`; see [review summary](../reviews/onboarding-acl-api/independent-review.md). OpenAI implementation was isolated and claimed before edits. No emergency path or same-lineage waiver was used; provenance is native work state, source/module hashes and private execution receipts, with no extra suite adapter claim.
+
+After acceptance, the operator's installed onboarding module was repaired to exact reviewed SHA-256 `efa997058059d8624101e1d9ccedfab1c2263e96a480f6b866dbbc42c43ba31c`, with code/RECORD backups and only its RECORD row updated. All other installed Python sources and both replaced-file ACLs were verified unchanged. Existing adapter behavior was preserved by avoiding a whole-package reinstall. The installed real HVAC client then passed synthetic GET/PUT/DELETE and rollback route checks with zero network calls; a second repair Plan reported already repaired. The CLI and existing capability's read-only local Plan still passed.
+
+This is a local runtime repair, not a published package release or authenticated Vault qualification. A later whole-package reinstall must include this source correction while preserving the separately maintained adapter behavior. The full-suite baseline failures remain open; they were not hidden by the targeted repair.
