@@ -201,19 +201,19 @@ class FakeVault:
         self.auth = MagicMock()
         self.secrets = MagicMock()
 
-        def read_policy(name: str) -> dict[str, str]:
+        def read_acl_policy(name: str) -> dict[str, str]:
             if policy_read_error is not None:
                 raise policy_read_error
             if name not in self.policies:
                 raise InvalidPath(f"policy {name} not found")
             return {"name": name, "rules": self.policies[name]}
 
-        def create_or_update_policy(name: str, hcl: str) -> None:
+        def create_or_update_acl_policy(name: str, hcl: str) -> None:
             if policy_write_error is not None:
                 raise policy_write_error
             self.policies[name] = hcl
 
-        def delete_policy(name: str) -> None:
+        def delete_acl_policy(name: str) -> None:
             if delete_policy_error is not None:
                 raise delete_policy_error
             self.policies.pop(name, None)
@@ -281,9 +281,9 @@ class FakeVault:
             self.kv.add(full)
             return {"data": {"version": 1}}
 
-        self.sys.read_policy.side_effect = read_policy
-        self.sys.create_or_update_policy.side_effect = create_or_update_policy
-        self.sys.delete_policy.side_effect = delete_policy
+        self.sys.read_acl_policy.side_effect = read_acl_policy
+        self.sys.create_or_update_acl_policy.side_effect = create_or_update_acl_policy
+        self.sys.delete_acl_policy.side_effect = delete_acl_policy
         self.auth.approle.read_role.side_effect = read_role
         self.auth.approle.create_or_update_approle.side_effect = create_or_update_approle
         self.auth.approle.delete_role.side_effect = delete_role
@@ -310,7 +310,7 @@ class FakeVault:
 
     @property
     def policy_write(self) -> MagicMock:
-        return self.sys.create_or_update_policy
+        return self.sys.create_or_update_acl_policy
 
     @property
     def role_write(self) -> MagicMock:
@@ -1398,7 +1398,7 @@ class TestM7ErrorsAndRollback:
         assert "prior state could not be read" in policy_row.detail
         assert "converged" not in policy_row.detail
         # And nothing was registered for rollback, since we did not create it.
-        vault.sys.delete_policy.assert_not_called()
+        vault.sys.delete_acl_policy.assert_not_called()
 
     def test_unwind_leaves_pre_existing_vault_objects_alone(
         self, tmp_path: Path
@@ -1413,7 +1413,7 @@ class TestM7ErrorsAndRollback:
         assert not report.ok
         assert onboard.policy_name(entry) in vault.policies
         assert onboard.role_name(entry) in vault.roles
-        vault.sys.delete_policy.assert_not_called()
+        vault.sys.delete_acl_policy.assert_not_called()
         vault.auth.approle.delete_role.assert_not_called()
 
     def test_failed_rollback_is_reported_not_swallowed(self, tmp_path: Path) -> None:

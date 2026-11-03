@@ -568,7 +568,7 @@ def _classify(exc: BaseException) -> Probe:
 
 def probe_policy(client: object, name: str) -> Probe:
     try:
-        resp = client.sys.read_policy(name)  # type: ignore[attr-defined]
+        resp = client.sys.read_acl_policy(name)  # type: ignore[attr-defined]
     except Exception as exc:
         return _classify(exc)
     if not isinstance(resp, dict):
@@ -1020,14 +1020,14 @@ def _apply_policy(
         if isinstance(live, str) and live.strip() == hcl.strip():
             return ApplyResult(action, "converged", "policy already matches")
     try:
-        client.sys.create_or_update_policy(pname, hcl)  # type: ignore[attr-defined]
+        client.sys.create_or_update_acl_policy(pname, hcl)  # type: ignore[attr-defined]
     except Exception as exc:
         return ApplyResult(action, "failed", f"policy write failed ({_sanitize(exc)})")
     if probe.present is False:
         # Only undo what we know we created. A policy that already existed (or
         # whose existence we could not determine) is operator state.
         def delete_policy() -> object:
-            return client.sys.delete_policy(pname)  # type: ignore[attr-defined]
+            return client.sys.delete_acl_policy(pname)  # type: ignore[attr-defined]
 
         undo.append(
             _Undo(
