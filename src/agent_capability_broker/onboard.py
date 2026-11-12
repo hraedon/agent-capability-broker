@@ -57,6 +57,20 @@ ROLE_CONFIG: dict[str, object] = {
 }
 _ROLE_DRIFT_KEYS = ("token_ttl", "token_max_ttl", "secret_id_ttl", "secret_id_num_uses")
 
+# Which provisioning model a call follows.
+#
+# ``identity`` (what the CLI does): each harness has ONE Vault identity, created
+# and granted outside acb (policy as code, reviewed). Onboarding a capability
+# then creates nothing in Vault's auth or policy: it verifies that the
+# harness's identity is granted the declared path, and can transit the value.
+#
+# ``approle`` (legacy, `--per-capability-approle`): acb itself creates a policy
+# and an AppRole per capability and writes a plane file per harness. That needs
+# an admin credential on the host and leaves roles nobody reviews.
+MODEL_IDENTITY = "identity"
+MODEL_APPROLE = "approle"
+_MODELS = (MODEL_IDENTITY, MODEL_APPROLE)
+
 # hvac exception class names that mean "the object is not there" as opposed to
 # "we were not allowed to look". Matched on the name so this module keeps its
 # lazy-hvac discipline (no module-level import of the optional extra).
@@ -142,6 +156,8 @@ class OnboardAction:
       ``create_role``      — create/converge the AppRole bound to that policy
       ``write_plane_env``  — render role_id/secret_id into one harness's plane file
       ``write_kv``         — transit a value into the KV path (never overwrites)
+      ``require_grant``    — identity model: the harness's own identity must be
+                             granted the declared path (verified, never created)
       ``rollback``         — synthesized during ``--apply`` unwind, never planned
 
     ``harness`` is the declared harness for ``write_plane_env`` and ``""`` for
@@ -324,7 +340,7 @@ def declared_fields(cap: Capability) -> list[str]:
 
 
 def validate_for_onboard(
-    cap: Capability, siblings: tuple[Capability, ...] = ()
+    cap: Capability, siblings: tuple[Capability, ...] = (), *, model: str = MODEL_APPROLE
 ) -> None:
     """Every refusal that needs no I/O, checked before any Vault contact.
 
@@ -348,11 +364,15 @@ def validate_for_onboard(
     vault_path_of(cap)
     declared_fields(cap)
     plane_targets(cap)
-    assert_plane_not_shared(cap, siblings)
+    if model not in _MODELS:
+        raise OnboardRefusal(f"unknown onboarding model {model!r}")
+    if model == MODEL_APPROLE:
+        # Identity model: a harness's capabilities sharing one plane is the point.
+        assert_plane_not_shared(cap, siblings)
 
 
 def plan_onboard(
-    cap: Capability, siblings: tuple[Capability, ...] = ()
+    cap: Capability, siblings: tuple[Capability, ...] = (), *, model: str = MODEL_APPROLE
 ) -> list[OnboardAction]:
     """Derive the ordered provisioning steps. Pure: no I/O, no hvac, no probes.
 
@@ -360,13 +380,34 @@ def plan_onboard(
     in reverse: policy, then the role bound to it, then the plane file(s) that
     hold that role's credentials, then the value.
     """
-    validate_for_onboard(cap, siblings)
+    validate_for_onboard(cap, siblings, model=model)
 
     pname = policy_name(cap)
     rname = role_name(cap)
     hcl = policy_hcl(cap)
     path = vault_path_of(cap)
     fields = declared_fields(cap)
+
+    if model == MODEL_IDENTITY:
+        # The value first: storing it does not depend on the grant, and a
+        # missing grant must not stop the value being stored.
+        identity_plan = [_kv_action(cap, path, fields)]
+        for target in plane_targets(cap):
+            identity_plan.append(
+                OnboardAction(
+                    capability=cap.id,
+                    kind="require_grant",
+                    target=str(target.path),
+                    harness=target.harness,
+                    summary=(
+                        f"harness {target.harness!r}'s Vault identity (the plane at "
+                        f"{target.path}) must be granted read on {path}; verified "
+                        f"with capabilities-self, never created here"
+                    ),
+                    payload={"plane_env": str(target.path), "vault_path": path},
+                )
+            )
+        return identity_plan
 
     plan: list[OnboardAction] = [
         OnboardAction(
@@ -400,19 +441,51 @@ def plan_onboard(
                 payload={"plane_env": str(target.path), "role_name": rname},
             )
         )
-    plan.append(
-        OnboardAction(
-            capability=cap.id,
-            kind="write_kv",
-            target=path,
-            summary=(
-                f"transit value(s) for fields {fields!r} into {path} with cas=0 "
-                f"(an existing value is never overwritten)"
-            ),
-            payload={"vault_path": path, "fields": fields},
-        )
-    )
+    plan.append(_kv_action(cap, path, fields))
     return plan
+
+
+def _kv_action(cap: Capability, path: str, fields: list[str]) -> OnboardAction:
+    return OnboardAction(
+        capability=cap.id,
+        kind="write_kv",
+        target=path,
+        summary=(
+            f"transit value(s) for fields {fields!r} into {path} with cas=0 "
+            f"(an existing value is never overwritten)"
+        ),
+        payload={"vault_path": path, "fields": fields},
+    )
+
+
+def grant_state(cap: Capability, action: OnboardAction) -> tuple[str, str]:
+    """(status, detail) for one ``require_grant`` row: ok / missing / unknown.
+
+    Asked with the harness's own plane, so no admin credential is involved and
+    the secret is not read (:func:`cred_vault.read_granted`).
+    """
+    from . import cred_vault  # lazy: keeps the [cred] extra optional
+
+    plane_env = str(action.payload["plane_env"])
+    path = str(action.payload["vault_path"])
+    if not Path(plane_env).is_file():
+        return "unknown", (
+            f"no plane file at {plane_env}: this harness has no Vault identity "
+            f"on this host yet (enroll it first)"
+        )
+    try:
+        granted = cred_vault.read_granted(cap, vault_env=plane_env)
+    except Exception as exc:
+        return "unknown", f"could not ask Vault ({_sanitize(exc)})"
+    if granted is None:
+        return "unknown", "could not ask Vault (login failed or unexpected reply)"
+    if granted:
+        return "ok", f"identity is granted read on {path}"
+    return "missing", (
+        f"identity is NOT granted read on {path}: add the path to this "
+        f"identity's grants where the estate keeps Vault policy as code, "
+        f"then re-run --check"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +823,8 @@ def check_onboard(
     cap: Capability,
     admin_env: str | os.PathLike[str] | None = None,
     siblings: tuple[Capability, ...] = (),
+    *,
+    model: str = MODEL_APPROLE,
 ) -> CheckReport:
     """Read-only drift report. Never mutates; never reads a secret value.
 
@@ -760,7 +835,7 @@ def check_onboard(
     then every unverifiable row is ``unknown`` — so the report is never
     ``clean``.
     """
-    plan = plan_onboard(cap, siblings)
+    plan = plan_onboard(cap, siblings, model=model)
     plane = load_admin_plane(admin_env)
     client = _admin_client(plane) if plane is not None else None
 
@@ -770,7 +845,11 @@ def check_onboard(
     results: list[CheckResult] = []
 
     for action in plan:
-        if action.kind == "create_policy":
+        if action.kind == "require_grant":
+            status, detail = grant_state(cap, action)
+            results.append(CheckResult(action, status, detail))
+
+        elif action.kind == "create_policy":
             if client is None:
                 results.append(
                     CheckResult(action, "unknown", "offline (no admin plane requested)")
@@ -945,6 +1024,8 @@ def apply_onboard(
     admin_env: str | os.PathLike[str] | None = None,
     values: dict[str, str] | None = None,
     siblings: tuple[Capability, ...] = (),
+    *,
+    model: str = MODEL_APPROLE,
 ) -> ApplyReport:
     """Provision idempotently, fail fast, and unwind what this run created.
 
@@ -962,8 +1043,14 @@ def apply_onboard(
       that itself fails is reported as ``rollback_failed`` so nothing is
       silently left behind.
     """
-    plan = plan_onboard(cap, siblings)
+    plan = plan_onboard(cap, siblings, model=model)
     plane = load_admin_plane(admin_env)
+    if model == MODEL_IDENTITY:
+        try:
+            return _apply_identity(cap, plan, plane, values)
+        finally:
+            if values is not None:
+                values.clear()
     if plane is None:
         raise OnboardRefusal(
             "onboarding requires --admin-env <file> or $ACB_VAULT_ADMIN_ENV "
@@ -1004,6 +1091,34 @@ def apply_onboard(
     finally:
         if values is not None:
             values.clear()
+    return ApplyReport(results=results)
+
+
+def _apply_identity(
+    cap: Capability,
+    plan: list[OnboardAction],
+    plane: AdminPlane | None,
+    values: dict[str, str] | None,
+) -> ApplyReport:
+    """Identity model: store the value if a privileged plane was supplied, then
+    report each harness's grant. Nothing is created in Vault's auth or policy,
+    so there is nothing to unwind. A missing grant is a failure of the run (the
+    capability is not usable there) but does not stop the other rows.
+    """
+    results: list[ApplyResult] = []
+    for action in plan:
+        if action.kind == "write_kv":
+            if plane is None:
+                results.append(ApplyResult(
+                    action, "skipped",
+                    "no privileged plane supplied (--admin-env): the value was not "
+                    "written; store it in Vault yourself or re-run with one",
+                ))
+            else:
+                results.append(_apply_kv(_admin_client(plane), action, values))
+            continue
+        status, detail = grant_state(cap, action)
+        results.append(ApplyResult(action, "converged" if status == "ok" else "failed", detail))
     return ApplyReport(results=results)
 
 

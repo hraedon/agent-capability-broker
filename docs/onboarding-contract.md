@@ -6,6 +6,30 @@ artifact is derived from it deterministically, so there is nothing to drift.
 
 `acb onboard cred:<name>` is a dry run.  `--check` audits.  `--apply` acts.
 
+## Two models
+
+**Identity model (the default since 0.2.0).** Each harness on a host has one
+Vault identity, created and granted outside acb, where the estate keeps Vault
+policy as code and reviews it.  Every credential capability of that harness
+reads through that one identity (its plane files all carry it).  `acb onboard`
+then creates nothing in Vault's auth or policy:
+
+| Step | What it does | Needs |
+|---|---|---|
+| `write_kv` | transit the value into the declared path with `cas=0` | a privileged plane (`--admin-env`); skipped without one |
+| `require_grant` (one per declared harness) | ask Vault, with that harness's own plane, whether its identity may read the declared path (`sys/capabilities-self`; the secret is not read) | the harness's plane file |
+
+A grant that is missing is reported with what to do (add the path to that
+identity's grants and re-run `--check`); it fails `--apply` but never stops the
+value being stored or the other harnesses being checked.  A harness with no
+plane file is `unknown`: it has no identity on this host yet.  `doctor` runs
+the same grant check for every credential capability.
+
+**Per-capability AppRole (legacy, `--per-capability-approle`).** acb creates a
+policy and an AppRole for the one capability and writes a plane file per
+harness.  This needs an admin credential on the host and leaves roles nobody
+reviewed.  Everything below this section describes this model.
+
 ## Derivation rules
 
 Given a `cred` capability with `source = "vault"` (the default):

@@ -331,6 +331,10 @@ def converged_vault(target: Capability = CAP, **kw: Any) -> FakeVault:
     )
 
 
+# These tests cover the legacy model, where acb creates the policy and AppRole.
+_ONBOARD = ("onboard", "cred:qual-bot", "--per-capability-approle")
+
+
 def run_cli(argv: list[str], vault: FakeVault | None = None) -> int:
     """Run `acb`, patching the admin client to `vault` when one is supplied."""
     if vault is None:
@@ -507,7 +511,7 @@ class TestM2PlaneWritePathCannotEscape:
         vault = FakeVault()
 
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin)],
             vault,
         )
@@ -531,7 +535,7 @@ class TestM2PlaneWritePathCannotEscape:
         admin = write_admin_env(tmp_path)
 
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin)],
             FakeVault(),
         )
@@ -544,7 +548,7 @@ class TestM2PlaneWritePathCannotEscape:
         admin = write_admin_env(tmp_path)
         with patch.object(onboard, "_admin_client") as admin_client:
             code = main(
-                ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+                [*_ONBOARD, "-m", str(manifest), "--apply",
                  "--admin-env", str(admin)]
             )
         assert code == 1
@@ -616,7 +620,7 @@ class TestM3PlaneLocationAgreesWithRuntime:
         expected = onboard.plane_targets(entry)[0].path
 
         assert run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin)],
             converged_vault(entry),
         ) == 0
@@ -698,7 +702,7 @@ class TestM1CheckVerifiesSomething:
             side_effect=onboard.OnboardRefusal("admin plane failed to authenticate"),
         ):
             code = main(
-                ["onboard", "cred:qual-bot", "-m", str(manifest), "--check",
+                [*_ONBOARD, "-m", str(manifest), "--check",
                  "--admin-env", str(admin)]
             )
         captured = capsys.readouterr()
@@ -717,7 +721,7 @@ class TestM1CheckVerifiesSomething:
             side_effect=onboard.OnboardRefusal("admin plane failed to authenticate"),
         ):
             code = main(
-                ["onboard", "cred:qual-bot", "-m", str(manifest), "--check",
+                [*_ONBOARD, "-m", str(manifest), "--check",
                  "--admin-env", str(admin), "--json"]
             )
         payload = json.loads(capsys.readouterr().out)
@@ -744,7 +748,7 @@ class TestM1CheckVerifiesSomething:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         manifest = write_manifest(tmp_path)
-        code = main(["onboard", "cred:qual-bot", "-m", str(manifest), "--check"])
+        code = main([*_ONBOARD, "-m", str(manifest), "--check"])
         out = capsys.readouterr().out
         assert code == 1
         assert "NOT CLEAN" in out
@@ -862,7 +866,7 @@ class TestM1CheckVerifiesSomething:
         vault = converged_vault(entry, kv={"kv/agent-suite/qual/bot"})
 
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--check",
+            [*_ONBOARD, "-m", str(manifest), "--check",
              "--admin-env", str(admin)],
             vault,
         )
@@ -1121,7 +1125,7 @@ class TestM5NoAmbientCredentials:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
         admin = write_admin_env(tmp_path, token=None)
         code = main(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--json"]
         )
         captured = capsys.readouterr()
@@ -1134,7 +1138,7 @@ class TestM5NoAmbientCredentials:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
         admin = write_admin_env(tmp_path, token=CANARY)
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin)],
             FakeVault(),
         )
@@ -1447,7 +1451,7 @@ class TestM7ErrorsAndRollback:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
         admin = write_admin_env(tmp_path)
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--json"],
             FakeVault(policy_write_error=exc),
         )
@@ -1471,7 +1475,7 @@ class TestM7ErrorsAndRollback:
             ),
         ):
             code = main(
-                ["onboard", "cred:qual-bot", "-m", str(manifest), "--check",
+                [*_ONBOARD, "-m", str(manifest), "--check",
                  "--admin-env", str(admin), "--json"]
             )
         payload = json.loads(capsys.readouterr().out)
@@ -1561,7 +1565,7 @@ class TestDryRunPerformsNoIO:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
         before = {p for p in tmp_path.rglob("*")}
         with patch.object(onboard, "_admin_client") as admin_client:
-            code = main(["onboard", "cred:qual-bot", "-m", str(manifest)])
+            code = main([*_ONBOARD, "-m", str(manifest)])
         assert code == 0
         admin_client.assert_not_called()
         assert {p for p in tmp_path.rglob("*")} == before
@@ -1578,7 +1582,7 @@ class TestDryRunPerformsNoIO:
         ), patch.object(Path, "chmod", forbidden), patch.object(
             os, "replace", forbidden
         ), patch.object(os, "open", forbidden):
-            assert main(["onboard", "cred:qual-bot", "-m", str(manifest)]) == 0
+            assert main([*_ONBOARD, "-m", str(manifest)]) == 0
 
     def test_dry_run_annotates_state_when_an_admin_plane_is_supplied(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1587,7 +1591,7 @@ class TestDryRunPerformsNoIO:
         entry = parse_manifest(manifest)[0]
         admin = write_admin_env(tmp_path)
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--admin-env",
+            [*_ONBOARD, "-m", str(manifest), "--admin-env",
              str(admin), "--json"],
             converged_vault(entry),
         )
@@ -1600,7 +1604,7 @@ class TestDryRunPerformsNoIO:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
-        main(["onboard", "cred:qual-bot", "-m", str(manifest), "--json"])
+        main([*_ONBOARD, "-m", str(manifest), "--json"])
         payload = json.loads(capsys.readouterr().out)
         assert payload["annotated"] is False
         assert all(step["state"] == "unknown" for step in payload["plan"])
@@ -1650,7 +1654,7 @@ class TestNoSecretsInOutput:
         )
         assert CANARY in str(leaky), "the fixture must actually carry the secret"
         argv = [
-            "onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            *_ONBOARD, "-m", str(manifest), "--apply",
             "--admin-env", str(admin), "--values-from", "stdin",
         ]
         if json_mode:
@@ -1667,7 +1671,7 @@ class TestNoSecretsInOutput:
         entry = parse_manifest(manifest)[0]
         plane = onboard.plane_targets(entry)[0].path
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--json"],
             FakeVault(secret_id_value=CANARY),
         )
@@ -1686,7 +1690,7 @@ class TestNoSecretsInOutput:
         )
         vault = FakeVault()
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--values-from", f"file:{values_file}",
              "--json"],
             vault,
@@ -1708,7 +1712,7 @@ class TestNoSecretsInOutput:
         values_file = tmp_path / "values.json"
         values_file.write_text(f'{{"password": "{CANARY}"', encoding="utf-8")
         code = main(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--values-from", f"file:{values_file}"]
         )
         captured = capsys.readouterr()
@@ -1771,7 +1775,7 @@ class TestNoSecretsInOutput:
         assert onboard._is_cas_conflict(conflict)
         with patch("sys.stdin.read", return_value=json.dumps({"password": CANARY})):
             exit_code = run_cli(
-                ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+                [*_ONBOARD, "-m", str(manifest), "--apply",
                  "--admin-env", str(admin), "--values-from", "stdin", "--json"],
                 FakeVault(kv_write_error=conflict),
             )
@@ -1792,14 +1796,14 @@ class TestM8ExitCodes:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
-        assert main(["onboard", "cred:qual-bot", "-m", str(manifest)]) == 0
+        assert main([*_ONBOARD, "-m", str(manifest)]) == 0
         assert "dry run" in capsys.readouterr().out
 
     def test_dry_run_json_is_a_single_document(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
-        main(["onboard", "cred:qual-bot", "-m", str(manifest), "--json"])
+        main([*_ONBOARD, "-m", str(manifest), "--json"])
         payload = json.loads(capsys.readouterr().out)
         assert payload["mode"] == "dry_run"
         assert payload["ok"] is True
@@ -1818,7 +1822,7 @@ class TestM8ExitCodes:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
         admin = write_admin_env(tmp_path)
         assert main(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--admin-env",
+            [*_ONBOARD, "-m", str(manifest), "--admin-env",
              str(admin), *argv_tail]
         ) == code
 
@@ -1836,7 +1840,7 @@ class TestM8ExitCodes:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         code = main(
-            ["onboard", "cred:qual-bot", "-m", str(tmp_path / "nope.toml"), "--json"]
+            [*_ONBOARD, "-m", str(tmp_path / "nope.toml"), "--json"]
         )
         payload = json.loads(capsys.readouterr().out)
         assert code == 1
@@ -1846,14 +1850,14 @@ class TestM8ExitCodes:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         manifest = write_manifest(tmp_path, extra='source = "suite"\n')
-        code = main(["onboard", "cred:qual-bot", "-m", str(manifest), "--json"])
+        code = main([*_ONBOARD, "-m", str(manifest), "--json"])
         payload = json.loads(capsys.readouterr().out)
         assert code == 1
         assert payload["error"]["code"] == "ONBOARD_REFUSED"
 
     def test_check_clean_zero_not_clean_one(self, tmp_path: Path) -> None:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
-        assert main(["onboard", "cred:qual-bot", "-m", str(manifest), "--check"]) == 1
+        assert main([*_ONBOARD, "-m", str(manifest), "--check"]) == 1
 
     def test_apply_failure_envelope_carries_partial_counts(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1863,7 +1867,7 @@ class TestM8ExitCodes:
         values_file = tmp_path / "values.json"
         values_file.write_text(json.dumps({"password": "x"}), encoding="utf-8")
         code = run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--values-from", f"file:{values_file}",
              "--json"],
             FakeVault(kv_write_error=Forbidden("denied")),
@@ -1882,13 +1886,13 @@ class TestM8ExitCodes:
         manifest = write_manifest(tmp_path, extra='source = "suite"\n')
         admin = write_admin_env(tmp_path)
         cases: list[list[str]] = [
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--json"],
+            [*_ONBOARD, "-m", str(manifest), "--json"],
             ["onboard", "cred:absent", "-m", str(manifest), "--json"],
             ["onboard", "bogus", "--json"],
-            ["onboard", "cred:qual-bot", "-m", str(tmp_path / "no.toml"), "--json"],
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--check", "--apply",
+            [*_ONBOARD, "-m", str(tmp_path / "no.toml"), "--json"],
+            [*_ONBOARD, "-m", str(manifest), "--check", "--apply",
              "--json"],
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin), "--values-from", "bogus", "--json"],
         ]
         for argv in cases:
@@ -1904,7 +1908,7 @@ class TestProvenance:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
         admin = write_admin_env(tmp_path)
         assert run_cli(
-            ["onboard", "cred:qual-bot", "-m", str(manifest), "--apply",
+            [*_ONBOARD, "-m", str(manifest), "--apply",
              "--admin-env", str(admin)],
             FakeVault(),
         ) == 0
@@ -1917,6 +1921,6 @@ class TestProvenance:
 
     def test_dry_run_and_check_emit_nothing(self, tmp_path: Path) -> None:
         manifest = write_manifest(tmp_path, extra='vault_env = "qual-bot.env"\n')
-        main(["onboard", "cred:qual-bot", "-m", str(manifest)])
-        main(["onboard", "cred:qual-bot", "-m", str(manifest), "--check"])
+        main([*_ONBOARD, "-m", str(manifest)])
+        main([*_ONBOARD, "-m", str(manifest), "--check"])
         assert not (tmp_path / "state" / "provenance.jsonl").exists()

@@ -960,6 +960,13 @@ def _onboard_capability(
     return cap, tuple(c for c in caps if c.id != cap_id)
 
 
+def _onboard_model(args: argparse.Namespace) -> str:
+    """Identity model unless the legacy per-capability AppRole was asked for."""
+    if getattr(args, "per_capability_approle", False):
+        return onboard.MODEL_APPROLE
+    return onboard.MODEL_IDENTITY
+
+
 def _onboard_dry_run(
     args: argparse.Namespace, cap: Capability, siblings: tuple[Capability, ...]
 ) -> int:
@@ -970,10 +977,17 @@ def _onboard_dry_run(
     path performs no Vault call and no filesystem write (WI-015 M8: exit 2 no
     longer doubles as "dry-run succeeded").
     """
-    plan = onboard.plan_onboard(cap, siblings)
+    model = _onboard_model(args)
+    plan = onboard.plan_onboard(cap, siblings, model=model)
     states: dict[int, onboard.CheckResult] = {}
-    if args.admin_env or os.environ.get("ACB_VAULT_ADMIN_ENV"):
-        report = onboard.check_onboard(cap, admin_env=args.admin_env, siblings=siblings)
+    if (
+        model == onboard.MODEL_IDENTITY
+        or args.admin_env
+        or os.environ.get("ACB_VAULT_ADMIN_ENV")
+    ):
+        report = onboard.check_onboard(
+            cap, admin_env=args.admin_env, siblings=siblings, model=model
+        )
         states = dict(enumerate(report.results))
 
     if args.json:
@@ -1019,7 +1033,9 @@ def _onboard_check(
     An unusable admin plane raises out of ``check_onboard`` and becomes an error
     envelope below — it is never reported as a clean state (WI-015 M1).
     """
-    report = onboard.check_onboard(cap, admin_env=args.admin_env, siblings=siblings)
+    report = onboard.check_onboard(
+        cap, admin_env=args.admin_env, siblings=siblings, model=_onboard_model(args)
+    )
     if args.json:
         print(json.dumps(
             {
@@ -1068,7 +1084,8 @@ def _onboard_apply(
 ) -> int:
     values = _read_values_from(args.values_from or "none")
     report = onboard.apply_onboard(
-        cap, admin_env=args.admin_env, values=values, siblings=siblings
+        cap, admin_env=args.admin_env, values=values, siblings=siblings,
+        model=_onboard_model(args),
     )
     for result in report.results:
         _emit_onboard_provenance(result)
@@ -1246,8 +1263,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ob = sub.add_parser(
         "onboard",
-        help="provision the Vault structure a cred capability declares "
-             "(dry-run unless --apply)",
+        help="verify a cred capability is usable by each harness's Vault identity, "
+             "and optionally store its value (dry-run unless --apply)",
     )
     ob.add_argument("capability_id", help="capability ID (e.g. cred:lab-hyperv-control)")
     ob.add_argument(
@@ -1267,6 +1284,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="privileged plane file (admin token or a dedicated onboarding AppRole; "
              "or set $ACB_VAULT_ADMIN_ENV). An ambient VAULT_TOKEN/VAULT_ADDR is "
              "never used.",
+    )
+    ob.add_argument(
+        "--per-capability-approle", action="store_true",
+        help="legacy model: create a Vault policy and AppRole for this one capability "
+             "and write a plane file per harness (needs --admin-env). Default: the "
+             "identity model, where the harness's existing Vault identity must already "
+             "be granted the path and nothing is created in Vault's auth or policy.",
     )
     ob.add_argument(
         "--values-from", default=None,
