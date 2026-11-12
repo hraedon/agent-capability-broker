@@ -30,7 +30,14 @@ def state_dir() -> Path:
 
 def _agent_identity() -> str:
     """Best-effort: which agent/harness performed the act."""
-    return os.environ.get("ACB_AGENT") or os.environ.get("USER") or "unknown"
+    # USERNAME is the Windows spelling of POSIX USER; without it every Windows
+    # provenance record is attributed to "unknown".
+    return (
+        os.environ.get("ACB_AGENT")
+        or os.environ.get("USER")
+        or os.environ.get("USERNAME")
+        or "unknown"
+    )
 
 
 def emit(result: ActionResult, *, purpose: str = "") -> Path:

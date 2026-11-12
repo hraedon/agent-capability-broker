@@ -70,6 +70,8 @@ class LauncherRequest:
             receipt = json.loads(receipt_raw)
         except (json.JSONDecodeError, TypeError) as exc:
             raise ValueError("ACB_CHECKOUT_RECEIPT is not valid JSON") from exc
+        if not isinstance(receipt, dict):
+            raise ValueError("ACB_CHECKOUT_RECEIPT must be a JSON object")
         if receipt.get("schema") != "acb.checkout-receipt.v1":
             raise ValueError("ACB_CHECKOUT_RECEIPT has an unexpected schema")
         invocation_id = receipt.get("invocation_id")
@@ -79,6 +81,8 @@ class LauncherRequest:
         if not isinstance(checkouts, list) or len(checkouts) != 1:
             raise ValueError("receipt must contain exactly one checkout")
         checkout = checkouts[0]
+        if not isinstance(checkout, dict):
+            raise ValueError("checkout must be a JSON object")
         capability_id = checkout.get("capability_id")
         if not isinstance(capability_id, str) or not capability_id:
             raise ValueError("checkout is missing capability_id")

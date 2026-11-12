@@ -146,9 +146,13 @@ and reconciles reality to it.
 
 ## Status
 
-Charter stage (2026-06-15). Landed through Plan 005: the manifest schema,
-provider interface (`cred`, `e2e`), harness adapters (Claude Code, opencode),
-and five verbs — `doctor` (read-only parity report), `shims` (read-only shim
-parity), `reconcile` (gated wiring generation), `exec` (inject-and-run), and
-`install-harness` (suite bootstrap). See `docs/capability-model.md` (design
-spine) and `plans/001`–`plans/005` for the build sequence.
+Reactivated 2026-10-08 (see the note at the top). Landed through Plan 009:
+the manifest schema, provider interface (`cred`, `e2e`), harness adapters
+(Claude Code, opencode, ZCode in the stable `all` set; Codex and Hermes as
+explicit targets), and the verbs `doctor` (read-only parity report plus
+rogue/clobbered shim audit), `shims` (read-only shim parity), `reconcile`
+(gated wiring generation), `exec` (inject-and-run, including composed
+multi-capability checkout), `install-harness` (suite bootstrap), `register`
+(append a cred capability to the manifest) and `onboard` (declared Vault
+onboarding). See `docs/capability-model.md` (design spine) and
+`plans/001`-`plans/009` for the build sequence.
