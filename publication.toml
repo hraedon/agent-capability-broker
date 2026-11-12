@@ -21,7 +21,7 @@ remote_owner = "hraedon"
 # address or a list — real history often carries more than one (a web-UI commit
 # lands as <user>@users.noreply.github.com). List every identity legitimate for
 # this repo; anything else refuses the push.
-author_email = ["hraedon@users.noreply.github.com", "plm@hraedon.com"]
+author_email = ["hraedon@users.noreply.github.com", "plm@hraedon.com", "merrittp@hraedon.com"]
 
 # "private-until-review" | "public"
 #
