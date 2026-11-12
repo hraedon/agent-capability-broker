@@ -41,8 +41,8 @@ def _add_server(
     path: Path, container_key: str | tuple[str, ...], name: str, entry: dict[str, object]
 ) -> WriteResult:
     """Add a new MCP server under `container_key`, creating file/container as
-    needed. `container_key` is a single key or a nested path (ZCode's
-    `mcp.servers`). Backs up an existing file first; refuses to clobber an
+    needed. `container_key` is a single key or a nested path (ZCode's and
+    opencode 2's `mcp.servers`). Backs up an existing file first; refuses to clobber an
     existing server of the same name (callers check existence for idempotence)."""
     keys = (container_key,) if isinstance(container_key, str) else container_key
     data = _load_json(path)
@@ -190,7 +190,13 @@ class ClaudeAdapter:
 
 
 class OpencodeAdapter:
-    """opencode: `~/.config/opencode/opencode.json` -> `mcp`."""
+    """opencode 2: `~/.config/opencode/opencode.json` -> `mcp.servers`.
+
+    OpenCode 2 nests servers under `mcp.servers` (V1 had them directly under
+    `mcp`) and replaced `enabled` with the inverse `disabled`. Command shims
+    live in `commands/`; OC2 reads the V1 `command/` name too, but only the
+    plural is native, and writing both would advertise every shim twice.
+    """
 
     name = "opencode"
 
@@ -203,8 +209,8 @@ class OpencodeAdapter:
 
     @property
     def shims_path(self) -> Path:
-        """Where opencode keeps command shims: a `command/` dir beside the config."""
-        return self.config_path.parent / "command"
+        """Where opencode keeps command shims: a `commands/` dir beside the config."""
+        return self.config_path.parent / "commands"
 
     @property
     def vault_env_path(self) -> Path:
@@ -215,13 +221,15 @@ class OpencodeAdapter:
         return self.config_path.is_file()
 
     def mcp_servers(self) -> dict[str, McpServer]:
-        return _servers_from(_load_json(self.config_path).get("mcp"))
+        mcp = _load_json(self.config_path).get("mcp")
+        servers = mcp.get("servers") if isinstance(mcp, dict) else None
+        return _servers_from(servers)
 
     def command_shims(self) -> set[str]:
-        """Command names this harness advertises: `command/<name>.md` file stems.
+        """Command names this harness advertises: `commands/<name>.md` file stems.
 
         Read-only — only names are enumerated, never the shim bodies. A missing
-        `command/` dir yields an empty set rather than an error.
+        `commands/` dir yields an empty set rather than an error.
         """
         cmd_dir = self.shims_path
         if not cmd_dir.is_dir():
@@ -238,10 +246,11 @@ class OpencodeAdapter:
         """
         data = _load_json(self.config_path)
         mcp = data.get("mcp")
-        if not isinstance(mcp, dict) or server not in mcp or not isinstance(mcp[server], dict):
+        servers = mcp.get("servers") if isinstance(mcp, dict) else None
+        if not isinstance(servers, dict) or not isinstance(servers.get(server), dict):
             raise KeyError(f"opencode mcp server {server!r} not found in {self.config_path}")
 
-        entry = mcp[server]
+        entry = servers[server]
         if entry.get("command") == argv:
             return WriteResult(changed=False, backup_path=None)
 
@@ -251,12 +260,16 @@ class OpencodeAdapter:
         return WriteResult(changed=True, backup_path=backup)
 
     def add_mcp_server(self, name: str, command: list[str]) -> WriteResult:
-        """Add a local MCP server to opencode's `mcp` (type/enabled/command shape)."""
-        entry: dict[str, object] = {"type": "local", "enabled": True, "command": list(command)}
-        return _add_server(self.config_path, "mcp", name, entry)
+        """Add a local MCP server to opencode 2's `mcp.servers` (type/command shape).
+
+        OC2 has no `enabled` key — servers are on unless `disabled` is true — so
+        the enabled default is expressed by writing neither.
+        """
+        entry: dict[str, object] = {"type": "local", "command": list(command)}
+        return _add_server(self.config_path, ("mcp", "servers"), name, entry)
 
     def write_command_shim(self, name: str, content: str) -> WriteResult:
-        """Render a command shim at `command/<name>.md`. Create-only (refuses to
+        """Render a command shim at `commands/<name>.md`. Create-only (refuses to
         overwrite a hand-edited shim); callers guard on `command_shims()`."""
         return _create_file(self.shims_path / f"{name}.md", content)
 
