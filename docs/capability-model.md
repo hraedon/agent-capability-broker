@@ -69,17 +69,102 @@ provider   = "cred"
 vault      = "kv/example/lab/control"
 fields     = ["username", "password"]
 env_prefix = "EXAMPLE_CONTROL"            # or inject = { username = "...", ... }
+trusted_argv = ["/opt/example/bin/lab-control", "--check"]   # required for every cred
 harnesses  = ["claude", "opencode"]
 ```
 
 - `harnesses` lists which harnesses *should* expose this capability. `doctor`
   reports a capability as `NOT_APPLICABLE` for harnesses not listed.
 - Provider-specific keys (`vault`, `field`, `engine`, `backend`, …) are validated
-  by the provider, not the core. The core only understands `provider` and
-  `harnesses`.
+  by the provider, not the core. The core understands `provider`, `harnesses`
+  and the v2 keys below (`issuer`, `delivery`, `assurance`, `decision`), plus the
+  optional manifest-level `[boundary]` table.
 - The manifest contains **no secrets** — only references (a Vault path, a browser
   engine). It is safe to commit *as an example with placeholders*; a real estate
   manifest pointing at real Vault paths is treated like a config and gitignored.
+
+### Manifest v2: delivery, issuer and assurance (Plan 012 §5)
+
+The trust boundary is the agent VM, so every capability should either *hide* its
+value (it never enters the VM) or *devalue* it (issued per use, scoped,
+short-lived, revocable). v2 lets the manifest say which, and `doctor` checks the
+claim. Every key is optional and additive; a v1 entry stays valid.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `issuer` | table; `kind` (non-empty string) required | What mints or holds the credential. Other keys (`mount`, `role`, `ttl`, `scopes`, …) are kept verbatim and not judged by the core. |
+| `delivery` | table; `rung` required | How it reaches the tool. `rung` is one of `helper` (native credential helper), `proxy` (in-VM egress proxy), `remote-op` (typed operation run off the VM), `env` (injection; compatibility only). Other keys (`tool`, `hosts`, `operation`, …) are kept verbatim. |
+| `assurance` | `D0`, `D1`, `H1` or `H1+D1` | The **declared floor**: the weakest level the operator accepts for this capability. |
+| `decision` | `auto`, `approve` or `deny` | Off-VM policy tier. Valid **only** when `delivery.rung = "remote-op"` (an in-VM rung cannot enforce it); anything else is a `ManifestError`. |
+| `harnesses` | non-empty list | Unchanged, but now **advisory**: the VM, not the harness, is the boundary. |
+
+Type and enum violations are ordinary `ManifestError`s, the same path as every
+other core-contract failure. Unknown `issuer.kind` values are accepted (the
+`issuer` table is extensible) but credited as non-issuing by the derivation
+below. An `assurance` floor of `H1` or `H1+D1` on a `helper`, `proxy` or `env`
+capability is also a `ManifestError` (see "helper and proxy are never H1"), and
+so is a launcher-first `trusted_argv` on a `cred` capability (see the `cred`
+provider).
+
+**Lossless v1 upconvert.** An entry with none of the four keys is read as
+`delivery = {rung = "env"}`, no issuer, and `assurance = "D0"`. Nothing is
+dropped: every other key stays in `Capability.options` for the provider. The
+parsed `Capability` keeps the *declared* floor separately from the upconverted
+`D0` so `doctor` can tell an acknowledged `D0` from an unexamined one.
+
+#### Assurance levels
+
+| Level | Meaning |
+|---|---|
+| `D0` | A standing secret is present in the VM. |
+| `D1` | Devalued: issued, scoped, short-lived, revocable. |
+| `H1` | Hidden: the value never enters the VM. |
+| `H1+D1` | Both. |
+
+Ordering for floor comparison is `D0 < D1 < H1 < H1+D1`.
+
+**Effective assurance** is derived, never trusted from the manifest, by one pure
+function (`model.derive_assurance`):
+
+| Delivery rung | Issuer | Effective |
+|---|---|---|
+| `remote-op` | issuing kind | `H1+D1` |
+| `remote-op` | none, static, or unlisted kind | `H1` |
+| `helper`, `proxy` or `env` | issuing kind | `D1` |
+| `helper`, `proxy` or `env` | none, `vault-kv`, or unlisted kind | `D0` |
+
+**`helper` and `proxy` are never `H1`.** Root in the VM is accepted, so a native
+credential helper hands the token to any VM process that asks, and an in-VM
+egress proxy holds it in VM memory. Neither hides anything; at best they devalue
+(`D1`, or `D0` for a static issuer such as `vault-kv`). Only `remote-op`, where
+the value never enters the VM, can be `H1`. Declaring `H1` or `H1+D1` for any
+other rung is refused when the manifest is parsed and, independently, is a
+failing `doctor` check.
+
+Issuing kinds: `vault-ssh-ca`, `vault-k8s-token`, `vault-ldap-library`,
+`vault-ldap-static`, `vault-database`, `vault-pki`, `remote-mint`. `vault-kv` is
+static. The derivation reads only the manifest entry; it makes no probe.
+
+`doctor` emits one `<capability>@assurance` check per credential-bearing
+capability (every `cred`, plus any capability declaring a v2 key):
+
+| Condition | Status |
+|---|---|
+| declared floor `H1` / `H1+D1` on a `helper`, `proxy` or `env` rung | `fail` (unattainable: only `remote-op` hides the value) |
+| effective level below the declared floor | `fail` |
+| effective `D0` on a `helper` or `proxy` rung (static or unlisted issuer), whatever floor is declared | `warn`, suggesting `remote-op` |
+| effective `D0`, no floor declared | `warn` (honest, never a pass) |
+| effective `D0`, floor declared `D0` | `ok` (acknowledged) |
+| otherwise | `ok` |
+
+```toml
+[capability."cred:forge-agent"]
+provider  = "cred"
+issuer    = { kind = "remote-mint", scopes = ["write:repository"], ttl = "15m" }
+delivery  = { rung = "helper", tool = "git" }
+assurance = "D1"
+harnesses = ["claude", "codex", "opencode"]    # advisory
+```
 
 ## 4. Status
 
@@ -132,9 +217,27 @@ First two providers:
   provider-neutral `source = "suite"`. Suite refs are explicit `vault:`,
   `azure:`, or `windows:` references resolved through the optional public
   `regista.secrets` facade. Doctor validates wiring and provider availability
-  but never resolves a value. Suite execution additionally requires an absolute
-  `trusted_argv` whose complete argv must match exactly before resolution. ACB
-  supplies a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
+  but never resolves a value. **Every** `cred` capability, whatever its source,
+  requires an absolute `trusted_argv` whose complete argv must match the
+  `acb exec` command exactly before any value is resolved (Plan 012 section 5); its first
+  element may not be a shell, interpreter or exec wrapper. The denylist lives in
+  one place (`launchers.py`): the shells (`sh`, `bash`, `zsh`, `dash`, `ksh`, `csh`,
+  `tcsh`, `fish`, `pwsh`, `powershell`, `cmd`), multi-call binaries (`busybox`,
+  `toybox`), interpreters and launchers (`python*`, `py`, `node`, `perl`, `ruby`,
+  `php`, `lua`, `tclsh`, `wish`, `expect`, `deno`, `bun`, `bunx`, `npx`, `uv`,
+  `uvx`, `osascript`, `wscript`, `cscript`, `mshta`, `rundll32`, `regsvr32`),
+  text tools that execute (`awk`, `gawk`, `mawk`, `sed`), wrappers that exec
+  what follows (`env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `sudo`,
+  `doas`, `su`, `xargs`, `find`, `script`) and `ssh`. Matching is on the
+  basename, case-insensitive, with `.exe .com .bat .cmd .ps1` stripped and
+  version suffixes covered (`python3.13`, `lua5.4`, `php8.3`, `ruby3.2`,
+  `perl5.38`, `node22`). The same rule runs when the manifest is parsed (a
+  launcher-first `trusted_argv` is a `ManifestError`), in `doctor`, and at
+  `acb exec`. It is a lint guard against operator mistakes, not a sandbox: the
+  control is the exact full-argv match against an operator-reviewed manifest. A
+  missing `trusted_argv` is a failing `doctor` check, and
+  `acb exec cred:x -- env` is refused before Vault is contacted. Suite execution
+  additionally gets a minimal child environment and a bounded timeout. Auth for the legacy Vault source resolves inside
   the provider: in-cluster k8s auth → AppRole `.env` → `VAULT_TOKEN`, where
   AppRole strictly precedes the token and **declared-but-incomplete AppRole
   material refuses** rather than downgrading to a token (WI-016; the plane
@@ -224,9 +327,43 @@ any lens sibling; the act path is where `acb` earns its "not read-only"
 asterisk, and every rule on it exists to keep a brokered secret or a generated
 config from doing harm or leaking.
 
-### Suite child-output and checkout-receipt boundary
+### `acb doctor --boundary` (read-only)
 
-`source = "suite"` does not make an arbitrary child safe. ACB never writes the
+The blast-radius rule (Plan 011 §3): **the agent VM holds no credential that
+administers anything that guards or issues secrets.** `--boundary` adds checks
+for what can be verified from inside the VM, to the normal report (same
+`ok`/`warn`/`fail` vocabulary and exit code: non-zero on any `fail`). Every
+probe is a policy *question*; none reads or uses a secret, and no output carries
+a token, certificate or kubeconfig content. Subprocesses run without a shell,
+with a timeout and a minimal environment.
+
+Optional manifest-level table (unknown keys are refused so a typo cannot silently
+disable a check):
+
+```toml
+[boundary]
+vault_namespace   = "example-vault"                # Kubernetes namespace of the secret store
+ssh_admin_targets = ["hypervisor-01.example.invalid"]
+```
+
+| Check | Verdict |
+|---|---|
+| `boundary.kubeconfig.cluster-admin`: `kubectl auth can-i '*' '*' --all-namespaces` | `yes` is `fail`, `no` is `ok` |
+| `boundary.kubeconfig.vault-secrets` / `.vault-exec`: `can-i get secrets` / `create pods/exec` with `-n <vault_namespace>` (only when `vault_namespace` is set) | `yes` is `fail`, `no` is `ok` |
+| `boundary.kubeconfig.mode` (POSIX): kubeconfig file mode | wider than `0600` is `warn` |
+| `boundary.vault-identity`: `sys/capabilities-self` on `sys/policies/acl/x`, `auth/x`, `identity/x`, `sys/mounts`, through the cred provider's client (`token=""`, fail closed, never an ambient token) | any capability other than `deny` is `fail` |
+| `boundary.ssh-admin:<host>` for each `ssh_admin_targets` entry | always `unknown`: "checked by hand" (acb never attempts SSH) |
+
+`unknown` means the check could not run (no `kubectl`, no kubeconfig, cluster or
+Vault unreachable, the `[cred]` extra absent, no auth material); it carries the
+reason and renders as the suite `warn`, exactly as `Status.UNKNOWN` does for a
+capability cell. It never crashes the report. Only the identity found by default
+resolution (the process environment and the default Vault env file) is probed;
+per-harness access planes are not enumerated.
+
+### Qualified-child output and checkout-receipt boundary
+
+No credential source makes an arbitrary child safe. ACB never writes the
 resolved value to its own stdout/stderr, argv, error, or provenance, but the
 qualified child receives it and inherits the operator's stdout/stderr. That
 child can print, transform, or exfiltrate the value. Therefore the complete,
@@ -293,7 +430,7 @@ Two deliberate behavior notes:
 **Composed checkout** runs one command with several capabilities at once:
 
 ```
-acb exec cred:example-control cred:example-guest -- <command> [args...]
+acb exec cred:example-control cred:example-guest -- <exact trusted_argv>
 ```
 
 All capabilities resolve from the invoking access plane (one `ACB_VAULT_ENV`),
@@ -301,7 +438,9 @@ inject under their declared names, and share a single receipt whose
 `checkouts` array covers every capability in order. This replaces nested
 `acb exec` shells that re-export values by hand — the pattern that moved
 secret handling back into ad-hoc shell. Only non-suite cred capabilities
-compose; the suite source keeps its dedicated exact-command trust model.
+compose; the suite source keeps its dedicated resolution model. The one
+command must equal **every** composed capability's `trusted_argv`, so a child
+is only handed values by capabilities that qualified it.
 Per-capability access-plane routing at exec time (two planes in one composed
 checkout) remains open.
 

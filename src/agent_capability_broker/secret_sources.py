@@ -13,6 +13,7 @@ from enum import StrEnum
 from pathlib import Path, PureWindowsPath
 from typing import Protocol, cast
 
+from .launchers import LAUNCHER_REFUSAL, is_launcher
 from .model import Capability
 
 
@@ -120,10 +121,22 @@ def _mapping(cap: Capability, name: str) -> dict[str, str]:
 
 
 def _trusted_argv(cap: Capability) -> tuple[str, ...]:
+    """The capability's exact manifest-qualified child command.
+
+    Required for **every** ``cred`` capability whatever its source (Plan 012
+    section 5): without it ``acb exec cred:x -- env`` would hand the resolved
+    value to an arbitrary caller-chosen command. The executable must be an
+    absolute path (PATH is never consulted) and may not be a shell, interpreter
+    or exec wrapper (``launchers.is_launcher``; a lint guard against operator
+    mistakes, not a sandbox -- the exact full-argv match is the control). The
+    same rule runs at manifest parse time. Pure validation -- no value is
+    resolved.
+    """
     raw = cap.options.get("trusted_argv")
     if not isinstance(raw, list) or not raw:
         raise SecretSourceConfigError(
-            f"{cap.id}: source 'suite' requires a non-empty options.trusted_argv list"
+            f"{cap.id}: options.trusted_argv is required for every cred capability "
+            f"(a non-empty list naming the exact child command)"
         )
     if any(not isinstance(part, str) or not part for part in raw):
         raise SecretSourceConfigError(
@@ -135,16 +148,75 @@ def _trusted_argv(cap: Capability) -> tuple[str, ...]:
         raise SecretSourceConfigError(
             f"{cap.id}: options.trusted_argv must name an absolute executable path"
         )
+    if is_launcher(executable):
+        raise SecretSourceConfigError(
+            f"{cap.id}: options.trusted_argv {LAUNCHER_REFUSAL}"
+        )
     return argv
 
 
-def validate_suite_command(cap: Capability, argv: list[str]) -> None:
-    """Require the exact pre-qualified child command before touching a value."""
+UNQUALIFIED_EXEC_OPTION = "unqualified_exec"
+
+
+def unqualified_exec(cap: Capability) -> bool:
+    """Whether the manifest explicitly keeps this capability unqualified: any
+    command the caller names may receive the credential.
+
+    This is the pre-Plan-012 behaviour, kept as a per-capability opt-out so an
+    estate can move its capabilities to an exact ``trusted_argv`` one at a time
+    instead of all at once. It must be written down (absence of ``trusted_argv``
+    is still an error), it cannot be combined with ``trusted_argv``, a suite
+    source never allows it, and ``doctor`` reports every such capability as a
+    warning. Pure validation: no value is resolved.
+    """
+    raw = cap.options.get(UNQUALIFIED_EXEC_OPTION)
+    if raw is None or raw is False:
+        return False
+    if raw is not True:
+        raise SecretSourceConfigError(
+            f"{cap.id}: options.{UNQUALIFIED_EXEC_OPTION} must be true or false"
+        )
+    if "trusted_argv" in cap.options:
+        raise SecretSourceConfigError(
+            f"{cap.id}: declare either options.trusted_argv or "
+            f"options.{UNQUALIFIED_EXEC_OPTION} = true, not both"
+        )
+    if cap.options.get("source", "vault") == "suite":
+        raise SecretSourceConfigError(
+            f"{cap.id}: source 'suite' always requires options.trusted_argv"
+        )
+    return True
+
+
+def validate_cred_trusted_argv(cap: Capability) -> tuple[str, ...]:
+    """Validate a cred capability's exec declaration (any source): its exact
+    ``trusted_argv``, or the explicit unqualified opt-out (returned as ``()``)."""
+    if unqualified_exec(cap):
+        return ()
+    if "trusted_argv" not in cap.options:
+        raise SecretSourceConfigError(
+            f"{cap.id}: options.trusted_argv is required for every cred capability "
+            f"(a non-empty list naming the exact child command), or set "
+            f"options.{UNQUALIFIED_EXEC_OPTION} = true to keep allowing any command "
+            f"(doctor reports that as a warning)"
+        )
+    return _trusted_argv(cap)
+
+
+def validate_exec_command(cap: Capability, argv: list[str]) -> None:
+    """Require the exact manifest-qualified command before touching a value,
+    unless the capability is explicitly unqualified."""
+    if unqualified_exec(cap):
+        return
     trusted = _trusted_argv(cap)
     if tuple(argv) != trusted:
         raise SecretSourceConfigError(
             f"{cap.id}: requested command does not match options.trusted_argv"
         )
+
+
+# Historical name from when only ``source = "suite"`` was qualified.
+validate_suite_command = validate_exec_command
 
 
 def _timeout_seconds(cap: Capability) -> float:
@@ -271,5 +343,9 @@ __all__ = [
     "resolve_suite",
     "source_kind",
     "suite_spec",
+    "UNQUALIFIED_EXEC_OPTION",
+    "unqualified_exec",
+    "validate_cred_trusted_argv",
+    "validate_exec_command",
     "validate_suite_command",
 ]

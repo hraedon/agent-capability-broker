@@ -9,10 +9,10 @@ gated credential job.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from _childpy import CHILD_PY, trusting, trusting_all
 
 from agent_capability_broker import providers, secret_sources
 from agent_capability_broker.model import Capability, Status
@@ -88,7 +88,7 @@ def _cap_for_backend(
     if inject is None:
         inject = {name: f"LAB_{name.upper()}" for name in fields}
     if trusted_argv is None:
-        trusted_argv = [sys.executable, "-c", "pass"]
+        trusted_argv = [CHILD_PY, "-c", "pass"]
     return Capability(
         "cred:lab-control",
         "cred",
@@ -223,10 +223,10 @@ def test_valid_use_through_exec_injects_and_leaks_nothing(
         f"pathlib.Path({str(out)!r}).write_text(json.dumps("
         "[os.environ['LAB_USERNAME'],os.environ['LAB_PASSWORD']]))"
     )
-    argv = [sys.executable, "-c", code]
+    argv = [CHILD_PY, "-c", code]
     cap = _cap_for_backend(backend, trusted_argv=argv)
 
-    assert CredProvider().exec(cap, argv) == 0
+    assert CredProvider().exec(trusting(cap, argv), argv) == 0
     assert json.loads(out.read_text()) == [USER_CANARY, PASS_CANARY]
     captured = capsys.readouterr()
     provenance_text = (tmp_path / "state" / "provenance.jsonl").read_text()
@@ -383,5 +383,6 @@ def test_composed_checkout_rejects_suite_capability(
     cap = _cap_for_backend("vault")
 
     with pytest.raises(SecretSourceConfigError, match="does not support source 'suite'"):
-        providers.exec_composed([cap], [sys.executable, "-c", "pass"])
+        child = [CHILD_PY, "-c", "pass"]
+        providers.exec_composed(trusting_all([cap], child), child)
     assert resolver.resolve_calls == []

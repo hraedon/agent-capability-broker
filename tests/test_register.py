@@ -41,7 +41,7 @@ def manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _register(manifest: Path, cap_id: str, *extra: str) -> int:
     return main(
         ["register", cap_id, "--vault", "kv/example/app/token", "--fields", "token",
-         *extra]
+         "--unqualified-exec", *extra]
     )
 
 

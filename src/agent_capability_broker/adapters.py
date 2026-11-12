@@ -141,7 +141,10 @@ _REMOTE_TYPES = {"remote", "http", "sse"}
 
 def _load_json(path: Path) -> dict[str, object]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            return {}  # an empty file is an empty config, not a corrupt one
+        data = json.loads(text)
     except OSError:
         return {}
     except json.JSONDecodeError as exc:

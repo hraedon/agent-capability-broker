@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _childpy import CHILD_PY, trusted_toml, trusting, trusting_all
 
 from agent_capability_broker import cred_vault, providers
 from agent_capability_broker.cli import main
@@ -47,7 +48,7 @@ def _fake_resolve(monkeypatch: pytest.MonkeyPatch, secrets: dict[str, dict[str, 
 def _dump_env_argv(out: Path, names: list[str]) -> list[str]:
     entries = ",".join(f"{n!r}:os.environ.get({n!r},'MISSING')" for n in names)
     code = f"import json,os,pathlib;pathlib.Path(r'{out}').write_text(json.dumps({{{entries}}}))"
-    return [sys.executable, "-c", code]
+    return [CHILD_PY, "-c", code]
 
 
 def test_env_prefix_names_child_vars(
@@ -61,13 +62,13 @@ def test_env_prefix_names_child_vars(
     cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
     out = tmp_path / "seen.json"
 
-    rc = CredProvider().exec(
-        cap,
-        _dump_env_argv(
+    rc = CredProvider().exec(trusting(cap, _dump_env_argv(
             out,
             ["HYPERV_CONTROL_USERNAME", "HYPERV_CONTROL_PASSWORD", "ACB_CHECKOUT_RECEIPT"],
-        ),
-    )
+        )), _dump_env_argv(
+            out,
+            ["HYPERV_CONTROL_USERNAME", "HYPERV_CONTROL_PASSWORD", "ACB_CHECKOUT_RECEIPT"],
+        ))
 
     assert rc == 0
     seen = json.loads(out.read_text())
@@ -102,9 +103,8 @@ def test_inject_mapping_wins_over_env_prefix(
     )
     out = tmp_path / "seen.json"
 
-    rc = CredProvider().exec(
-        cap, _dump_env_argv(out, ["HV_ADMIN_NAME", "HYPERV_CONTROL_PASSWORD"])
-    )
+    child = _dump_env_argv(out, ["HV_ADMIN_NAME", "HYPERV_CONTROL_PASSWORD"])
+    rc = CredProvider().exec(trusting(cap, child), child)
 
     assert rc == 0
     seen = json.loads(out.read_text())
@@ -130,9 +130,7 @@ def test_composed_checkout_injects_all_and_emits_one_receipt(
     ]
     out = tmp_path / "seen.json"
 
-    rc = exec_composed(
-        caps,
-        _dump_env_argv(
+    rc = exec_composed(trusting_all(caps, _dump_env_argv(
             out,
             [
                 "HYPERV_CONTROL_USERNAME",
@@ -141,8 +139,16 @@ def test_composed_checkout_injects_all_and_emits_one_receipt(
                 "GUEST_BOOTSTRAP_PASSWORD",
                 "ACB_CHECKOUT_RECEIPT",
             ],
-        ),
-    )
+        )), _dump_env_argv(
+            out,
+            [
+                "HYPERV_CONTROL_USERNAME",
+                "HYPERV_CONTROL_PASSWORD",
+                "GUEST_BOOTSTRAP_USERNAME",
+                "GUEST_BOOTSTRAP_PASSWORD",
+                "ACB_CHECKOUT_RECEIPT",
+            ],
+        ))
 
     assert rc == 0
     seen = json.loads(out.read_text())
@@ -176,7 +182,7 @@ def test_composed_bare_names_collide_and_refuse_before_resolution(
     caps = [_vault_cap("hyperv-control"), _vault_cap("guest-bootstrap")]
 
     with pytest.raises(SecretSourceConfigError):
-        exec_composed(caps, [sys.executable, "-c", "pass"])
+        exec_composed(trusting_all(caps, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_reserved_username_target_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +198,7 @@ def test_reserved_username_target_refused(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     with pytest.raises(SecretSourceConfigError, match="reserved"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_inherited_target_collision_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,7 +211,7 @@ def test_inherited_target_collision_refused(monkeypatch: pytest.MonkeyPatch) -> 
     cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
 
     with pytest.raises(SecretSourceConfigError, match="already exists"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_strict_path_refuses_inherited_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,7 +224,7 @@ def test_strict_path_refuses_inherited_receipt(monkeypatch: pytest.MonkeyPatch) 
     cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
 
     with pytest.raises(SecretSourceConfigError, match="nested checkout"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_bare_path_gets_fresh_receipt(
@@ -235,7 +241,8 @@ def test_bare_path_gets_fresh_receipt(
     )
     out = tmp_path / "seen.json"
 
-    rc = CredProvider().exec(cap, _dump_env_argv(out, ["PASSWORD", "ACB_CHECKOUT_RECEIPT"]))
+    child = _dump_env_argv(out, ["PASSWORD", "ACB_CHECKOUT_RECEIPT"])
+    rc = CredProvider().exec(trusting(cap, child), child)
 
     assert rc == 0
     seen = json.loads(out.read_text())
@@ -253,20 +260,21 @@ def test_composed_refuses_suite_source() -> None:
             "source": "suite",
             "refs": {"password": "vault:kv/example/lab/password"},
             "inject": {"password": "LAB_PASSWORD"},
-            "trusted_argv": [sys.executable, "-c", "pass"],
+            "trusted_argv": [CHILD_PY, "-c", "pass"],
         },
     )
+    child = [CHILD_PY, "-c", "pass"]
     with pytest.raises(SecretSourceConfigError, match="composed checkout"):
         exec_composed(
-            [_vault_cap("hyperv-control", "HYPERV_CONTROL"), suite_cap],
-            [sys.executable, "-c", "pass"],
+            [_vault_cap("hyperv-control", "HYPERV_CONTROL", trusted_argv=child), suite_cap],
+            child,
         )
 
 
 def test_composed_refuses_repeated_capability() -> None:
     cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
     with pytest.raises(RuntimeError, match="repeated"):
-        exec_composed([cap, cap], [sys.executable, "-c", "pass"])
+        exec_composed(trusting_all([cap, cap], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_resolved_fields_must_match_declared_selection(
@@ -281,7 +289,7 @@ def test_resolved_fields_must_match_declared_selection(
     cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
 
     with pytest.raises(RuntimeError, match="declared selection"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_cli_composed_exec_two_capabilities(
@@ -290,19 +298,21 @@ def test_cli_composed_exec_two_capabilities(
     monkeypatch.setenv("SRC_A", PASS_A)
     monkeypatch.setenv("SRC_B", PASS_B)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
-    manifest = tmp_path / "capabilities.toml"
-    manifest.write_text(
-        '[capability."cred:control"]\nprovider="cred"\nsource="env"\n'
-        'from_env="SRC_A"\nfield="password"\nenv_prefix="HYPERV_CONTROL"\n'
-        'harnesses=["opencode"]\n'
-        '[capability."cred:guest"]\nprovider="cred"\nsource="env"\n'
-        'from_env="SRC_B"\nfield="password"\nenv_prefix="GUEST_BOOTSTRAP"\n'
-        'harnesses=["opencode"]\n',
-        encoding="utf-8",
-    )
     out = tmp_path / "seen.json"
     child = _dump_env_argv(
         out, ["HYPERV_CONTROL_PASSWORD", "GUEST_BOOTSTRAP_PASSWORD", "ACB_CHECKOUT_RECEIPT"]
+    )
+    manifest = tmp_path / "capabilities.toml"
+    manifest.write_text(
+        '[capability."cred:control"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
+        'from_env="SRC_A"\nfield="password"\nenv_prefix="HYPERV_CONTROL"\n'
+        'harnesses=["opencode"]\n'
+        '[capability."cred:guest"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
+        'from_env="SRC_B"\nfield="password"\nenv_prefix="GUEST_BOOTSTRAP"\n'
+        'harnesses=["opencode"]\n',
+        encoding="utf-8",
     )
 
     rc = main(["exec", "cred:control", "cred:guest", "-m", str(manifest), "--", *child])
@@ -331,7 +341,7 @@ def test_cli_unknown_second_capability_errors(
 
     rc = main(
         ["exec", "cred:control", "cred:nope", "-m", str(manifest), "--",
-         sys.executable, "-c", "pass"]
+         CHILD_PY, "-c", "pass"]
     )
 
     assert rc == 2
@@ -356,7 +366,8 @@ def test_composed_receipt_parses_with_evidence_lab_boundary(
         _vault_cap("lab-guest-bootstrap", "GUEST_BOOTSTRAP"),
     ]
     out = tmp_path / "seen.json"
-    rc = exec_composed(caps, _dump_env_argv(out, ["ACB_CHECKOUT_RECEIPT"]))
+    child = _dump_env_argv(out, ["ACB_CHECKOUT_RECEIPT"])
+    rc = exec_composed(trusting_all(caps, child), child)
     assert rc == 0
     raw = json.loads(out.read_text())["ACB_CHECKOUT_RECEIPT"]
 
@@ -406,7 +417,7 @@ def test_env_prefix_alone_prevents_bare_collision_across_env(
         _vault_cap("hyperv-control", "HYPERV_CONTROL"),
         _vault_cap("guest-bootstrap", "GUEST_BOOTSTRAP"),
     ]
-    rc = exec_composed(caps, [sys.executable, "-c", "pass"])
+    rc = exec_composed(trusting_all(caps, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
     assert rc == 0
 
 
@@ -421,19 +432,18 @@ def test_child_command_tokens_are_never_treated_as_capabilities(
     tokenwise scan ran over the whole child command)."""
     monkeypatch.setenv("SRC", PASS_A)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    out = tmp_path / "argv.json"
+    code = f"import json,sys,pathlib;pathlib.Path(r'{out}').write_text(json.dumps(sys.argv[1:]))"
+    child = [CHILD_PY, "-c", code, "cred:zzz", "hello", "-m", "marker"]
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
         '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
         'from_env="SRC"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
-    out = tmp_path / "argv.json"
-    code = f"import json,sys,pathlib;pathlib.Path(r'{out}').write_text(json.dumps(sys.argv[1:]))"
 
-    rc = main(
-        ["exec", "-m", str(manifest), "cred:test", "--",
-         sys.executable, "-c", code, "cred:zzz", "hello", "-m", "marker"]
-    )
+    rc = main(["exec", "-m", str(manifest), "cred:test", "--", *child])
 
     assert rc == 0
     assert json.loads(out.read_text()) == ["cred:zzz", "hello", "-m", "marker"]
@@ -444,17 +454,16 @@ def test_historical_single_capability_form_without_separator(
 ) -> None:
     monkeypatch.setenv("SRC", PASS_A)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    child = [CHILD_PY, "-c", "raise SystemExit(3)"]
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
         '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
         'from_env="SRC"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
 
-    rc = main(
-        ["exec", "-m", str(manifest), "cred:test",
-         sys.executable, "-c", "raise SystemExit(3)"]
-    )
+    rc = main(["exec", "-m", str(manifest), "cred:test", *child])
 
     assert rc == 3
 
@@ -462,7 +471,7 @@ def test_historical_single_capability_form_without_separator(
 def test_non_capability_token_before_separator_errors(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rc = main(["exec", "cred:test", "bogus-token", "--", sys.executable, "-c", "pass"])
+    rc = main(["exec", "cred:test", "bogus-token", "--", CHILD_PY, "-c", "pass"])
     assert rc == 2
     assert "bogus-token" in capsys.readouterr().err
 
@@ -480,7 +489,7 @@ def test_lowercase_env_prefix_refused_before_resolution(
     cap = _vault_cap("hyperv-control", "hyperv_control")
 
     with pytest.raises(SecretSourceConfigError, match="not a valid environment name"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_nonconformant_capability_id_refused_on_strict_path(
@@ -497,7 +506,7 @@ def test_nonconformant_capability_id_refused_on_strict_path(
     )
 
     with pytest.raises(SecretSourceConfigError, match="receipt-conformant"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_launch_failure_emits_provenance_and_contained_error(
@@ -514,7 +523,8 @@ def test_launch_failure_emits_provenance_and_contained_error(
     cap = _vault_cap("hyperv-control", "HYPERV_CONTROL")
 
     with pytest.raises(RuntimeError, match="child launch failed"):
-        CredProvider().exec(cap, [str(tmp_path / "no-such-binary")])
+        child = [str(tmp_path / "no-such-binary")]
+        CredProvider().exec(trusting(cap, child), child)
 
     log = (state / "provenance.jsonl").read_text()
     assert '"started"' in log and "child launch failed" in log
@@ -558,7 +568,8 @@ def test_bare_path_launch_failure_emits_provenance_and_contains_error(
     )
 
     with pytest.raises(RuntimeError, match="child launch failed"):
-        CredProvider().exec(cap, [str(tmp_path / "no-such-binary")])
+        child = [str(tmp_path / "no-such-binary")]
+        CredProvider().exec(trusting(cap, child), child)
 
     log = (state / "provenance.jsonl").read_text()
     events = [json.loads(line) for line in log.splitlines() if line.strip()]
@@ -585,7 +596,7 @@ def test_bare_path_successful_exec_emits_started_and_terminal(
         {"source": "env", "from_env": "SRC", "field": "password"},
     )
 
-    rc = CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+    rc = CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
     assert rc == 0
 
     log = (state / "provenance.jsonl").read_text()
@@ -645,7 +656,7 @@ def test_cli_unknown_option_after_capability_errors(
     )
 
     rc = main(
-        ["exec", "cred:test", "-x", "--", sys.executable, "-c", "pass", "-m", str(manifest)]
+        ["exec", "cred:test", "-x", "--", CHILD_PY, "-c", "pass", "-m", str(manifest)]
     )
 
     assert rc == 2
@@ -661,19 +672,18 @@ def test_cli_historical_form_passes_flag_like_child_args(
     flag-shaped child arguments."""
     monkeypatch.setenv("SRC", PASS_A)
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
+    out = tmp_path / "argv.json"
+    code = f"import json,sys,pathlib;pathlib.Path(r'{out}').write_text(json.dumps(sys.argv[1:]))"
+    child = [CHILD_PY, "-c", code, "-x", "--flag", "positional"]
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
         '[capability."cred:test"]\nprovider="cred"\nsource="env"\n'
+        f"{trusted_toml(child)}"
         'from_env="SRC"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
-    out = tmp_path / "argv.json"
-    code = f"import json,sys,pathlib;pathlib.Path(r'{out}').write_text(json.dumps(sys.argv[1:]))"
 
-    rc = main(
-        ["exec", "-m", str(manifest), "cred:test",
-         sys.executable, "-c", code, "-x", "--flag", "positional"]
-    )
+    rc = main(["exec", "-m", str(manifest), "cred:test", *child])
 
     assert rc == 0
     assert json.loads(out.read_text()) == ["-x", "--flag", "positional"]
@@ -773,7 +783,7 @@ def test_bare_path_resolution_failure_emits_started_and_failed_provenance(
     )
 
     with pytest.raises(RuntimeError, match="ACB_NEVER_SET_VAR"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
     log = (state / "provenance.jsonl").read_text()
     events = [json.loads(line) for line in log.splitlines() if line.strip()]
@@ -799,7 +809,7 @@ def test_strict_path_started_summary_does_not_claim_injection(
     monkeypatch.setattr(cred_vault, "resolve", _boom)
 
     with pytest.raises(RuntimeError, match="boom"):
-        exec_composed([cap], [sys.executable, "-c", "pass"])
+        exec_composed(trusting_all([cap], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
     events = [
         json.loads(line)
@@ -824,7 +834,7 @@ def test_strict_path_terminal_summary_records_injected_vars(
     cap = _vault_cap("strict-ok", prefix="STRICT_OK")
     _fake_resolve(monkeypatch, {cap.id: {"username": USER_A, "password": PASS_A}})
 
-    rc = exec_composed([cap], [sys.executable, "-c", "pass"])
+    rc = exec_composed(trusting_all([cap], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
     assert rc == 0
 
     events = [
@@ -858,7 +868,7 @@ def test_bare_path_refuses_oversized_receipt(
     monkeypatch.setattr(cred_vault, "resolve", lambda _cap: dict(many_fields))
 
     with pytest.raises(SecretSourceConfigError, match="exceeds the 16 KiB contract limit"):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
     events = [
         json.loads(line)
@@ -891,7 +901,7 @@ def test_composed_rejects_malformed_inject_before_resolution(
     )
 
     with pytest.raises(SecretSourceConfigError, match="options.inject must be a mapping"):
-        exec_composed([good, bad], [sys.executable, "-c", "pass"])
+        exec_composed(trusting_all([good, bad], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_composed_rejects_malformed_env_prefix_before_resolution(
@@ -909,7 +919,7 @@ def test_composed_rejects_malformed_env_prefix_before_resolution(
     )
 
     with pytest.raises(SecretSourceConfigError, match="options.env_prefix must be a string"):
-        exec_composed([bad], [sys.executable, "-c", "pass"])
+        exec_composed(trusting_all([bad], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
 
 def test_strict_path_emits_terminal_provenance_on_keyboard_interrupt(
@@ -932,7 +942,7 @@ def test_strict_path_emits_terminal_provenance_on_keyboard_interrupt(
     monkeypatch.setattr(providers.subprocess, "run", _raise_kbi)
 
     with pytest.raises(KeyboardInterrupt):
-        exec_composed([cap], [sys.executable, "-c", "pass"])
+        exec_composed(trusting_all([cap], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
     log = (state / "provenance.jsonl").read_text()
     events = [json.loads(line) for line in log.splitlines() if line.strip()]
@@ -959,7 +969,7 @@ def test_bare_path_emits_terminal_provenance_on_keyboard_interrupt(
     monkeypatch.setattr(providers.subprocess, "run", _raise_kbi)
 
     with pytest.raises(KeyboardInterrupt):
-        CredProvider().exec(cap, [sys.executable, "-c", "pass"])
+        CredProvider().exec(trusting(cap, [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
 
     log = (state / "provenance.jsonl").read_text()
     events = [json.loads(line) for line in log.splitlines() if line.strip()]
@@ -979,7 +989,7 @@ def test_strict_path_started_and_terminal_events_are_ordered_and_correlated(
     cap = _vault_cap("ordered", prefix="ORD")
     _fake_resolve(monkeypatch, {cap.id: {"username": USER_A, "password": PASS_A}})
 
-    rc = exec_composed([cap], [sys.executable, "-c", "pass"])
+    rc = exec_composed(trusting_all([cap], [CHILD_PY, "-c", "pass"]), [CHILD_PY, "-c", "pass"])
     assert rc == 0
 
     events = [

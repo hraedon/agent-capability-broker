@@ -5,4 +5,4 @@ path) is stdlib-only. Provider backends (Vault for `cred`) and any narration
 layer are optional extras that the core never imports.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -31,6 +31,9 @@ def test_example_manifest_parses() -> None:
         "e2e:chromium",
         "cred:example-control",
         "cred:example-guest",
+        "cred:forge-agent",
+        "cred:lab-ssh",
+        "cred:ad-query",
     }
     e2e = next(c for c in caps if c.id == "e2e:chromium")
     assert e2e.provider == "e2e"

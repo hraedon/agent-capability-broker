@@ -19,6 +19,7 @@ from contextlib import redirect_stdout, suppress
 from pathlib import Path
 
 from . import onboard, provenance
+from .boundary import BoundaryCheck, run_boundary_checks
 from .model import (
     KNOWN_HARNESSES,
     Action,
@@ -27,6 +28,10 @@ from .model import (
     ManifestError,
     Status,
     Verdict,
+    assurance_rank,
+    derive_assurance,
+    hidden_floor_problem,
+    parse_boundary,
     parse_manifest,
     resolve_manifest,
 )
@@ -36,6 +41,12 @@ from .providers import (
     _assert_safe_path_component,
     adapters,
     exec_composed,
+)
+from .secret_sources import (
+    UNQUALIFIED_EXEC_OPTION,
+    SecretSourceConfigError,
+    unqualified_exec,
+    validate_cred_trusted_argv,
 )
 from .surface import ShimSurface, SurfaceFinding, audit_surface
 
@@ -201,6 +212,102 @@ def _surface_checks(findings: list[SurfaceFinding]) -> list[dict[str, object]]:
     ]
 
 
+def _assurance_checks(caps: list[Capability]) -> list[dict[str, object]]:
+    """Per-capability assurance report (Plan 012 §5): effective level vs declared floor.
+
+    The effective level is derived deterministically from the manifest entry
+    (`derive_assurance`). Below the declared floor is a hard ``fail``, and so is
+    an ``H1`` / ``H1+D1`` floor on a rung that cannot hide the value (only
+    ``remote-op`` can: root in the VM is accepted). A ``D0`` capability with no
+    declared floor, or a ``D0`` one delivered by the ``helper`` / ``proxy`` rung,
+    is a ``warn`` -- reported honestly, never passed. Capabilities that hold no
+    credential (a v1 ``e2e`` entry) are not judged unless they declare a v2 key.
+    """
+    checks: list[dict[str, object]] = []
+    for cap in caps:
+        if cap.provider != "cred" and not cap.declares_v2:
+            continue
+        effective, reason = derive_assurance(cap)
+        floor = cap.declared_assurance
+        impossible = hidden_floor_problem(cap.rung, floor)
+        if impossible is not None:
+            # A helper/proxy/env capability can never be H1, whatever the issuer:
+            # the value enters the VM. Reported as its own failure so the fix
+            # (move to remote-op, or lower the floor) is unmistakable.
+            status = "fail"
+            detail = impossible
+        elif floor is not None and assurance_rank(effective) < assurance_rank(floor):
+            status = "fail"
+            detail = f"effective {effective} is below the declared floor {floor} ({reason})"
+        elif effective == "D0" and cap.rung in ("helper", "proxy"):
+            # Honest even when the D0 floor is acknowledged: a native helper hands
+            # the token to any VM process that asks, and a proxy holds it in VM
+            # memory, so a static source here is a standing secret in the VM.
+            status = "warn"
+            detail = (
+                f"D0: a static source delivered by the {cap.rung} rung is a standing "
+                f"secret in the VM; use an issuing issuer (D1) or move it behind "
+                f"'remote-op' so the value never enters the VM ({reason})"
+            )
+        elif floor is None and effective == "D0":
+            status = "warn"
+            detail = f"D0: a standing secret in the VM, with no assurance floor declared ({reason})"
+        elif floor is None:
+            status = "ok"
+            detail = f"effective {effective}; no floor declared ({reason})"
+        elif effective == "D0":
+            status = "ok"
+            detail = f"effective D0 meets the declared floor D0 (acknowledged; {reason})"
+        else:
+            status = "ok"
+            detail = f"effective {effective} meets the declared floor {floor} ({reason})"
+        checks.append(
+            {
+                "name": f"{cap.id}@assurance",
+                "capability": cap.id,
+                "harness": None,
+                "status": status,
+                "detail": detail,
+                "kind": "assurance",
+                "effective": effective,
+                "declared": floor,
+            }
+        )
+    return checks
+
+
+def _unqualified_exec_checks(caps: list[Capability]) -> list[dict[str, object]]:
+    """One ``warn`` per cred capability the manifest keeps unqualified.
+
+    Such a capability works, and ``acb exec`` will hand its credential to any
+    command the caller names (``acb exec cred:x -- env`` prints it). The warning
+    is the standing reminder to give it an exact ``trusted_argv``.
+    """
+    checks: list[dict[str, object]] = []
+    for cap in caps:
+        if cap.provider != "cred":
+            continue
+        try:
+            if not unqualified_exec(cap):
+                continue
+        except SecretSourceConfigError:
+            continue  # reported as present_broken by the capability's own row
+        checks.append(
+            {
+                "name": f"{cap.id}@exec",
+                "capability": cap.id,
+                "harness": None,
+                "status": "warn",
+                "detail": (
+                    "unqualified: any command may receive this credential; declare "
+                    "options.trusted_argv (one exact, non-shell command) to close it"
+                ),
+                "kind": "unqualified_exec",
+            }
+        )
+    return checks
+
+
 def _classify_health(checks: list[dict[str, object]]) -> tuple[bool, bool]:
     """Classify component health from checks the way the siblings do.
 
@@ -221,6 +328,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         manifest_path = resolve_manifest(args.manifest)
         verdicts = _inspect_all(manifest_path)
         findings = _surface_findings(manifest_path)
+        parsed = parse_manifest(manifest_path)
+        assurance = _assurance_checks(parsed)
+        unqualified = _unqualified_exec_checks(parsed)
+        boundary: list[BoundaryCheck] = []
+        if getattr(args, "boundary", False):
+            boundary = run_boundary_checks(parse_boundary(manifest_path))
     except ManifestError as exc:
         # A missing or malformed manifest is an *operational* failure, not a
         # usage error: emit the contract-v1 envelope (§3) and exit 1, not 2.
@@ -228,7 +341,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         # reclassification — acb WI-014 defers that; this read-only path is safe.)
         return emit_error("MANIFEST_ERROR", str(exc), use_json=args.json)
 
-    checks = _doctor_checks(verdicts) + _surface_checks(findings)
+    checks = (
+        _doctor_checks(verdicts)
+        + _surface_checks(findings)
+        + assurance
+        + unqualified
+        + [b.as_check() for b in boundary]
+    )
     ok, degraded = _classify_health(checks)
 
     if args.json:
@@ -252,6 +371,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _print_table(verdicts)
         for finding in findings:
             print(f"{finding.status.upper():<5} {finding.name}  ({finding.detail})")
+        for a in assurance:
+            print(f"{str(a['status']).upper():<5} {a['name']}  ({a['detail']})")
+        for u in unqualified:
+            print(f"{str(u['status']).upper():<5} {u['name']}  ({u['detail']})")
+        for b in boundary:
+            print(f"{b.verdict.upper():<7} {b.name}  ({b.detail})")
 
     # Exit-code consistent with the JSON verdict (sibling convention: exit 0
     # for ok and degraded, non-zero on a hard fail). Same parity gate as before
@@ -780,13 +905,15 @@ def _toml_basic_string(value: str) -> str:
     return "".join(out)
 
 
-def _serialize_toml_value(value: str | list[str]) -> str:
+def _serialize_toml_value(value: str | list[str] | bool) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, list):
         return "[" + ", ".join(_toml_basic_string(v) for v in value) + "]"
     return _toml_basic_string(value)
 
 
-def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]]) -> str:
+def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str] | bool]) -> str:
     lines = [f"[capability.{_toml_basic_string(cap_id)}]"]
     lines.append(f'provider   = {_serialize_toml_value("cred")}')
     for key, value in options.items():
@@ -797,7 +924,7 @@ def _serialize_capability_toml(cap_id: str, options: dict[str, str | list[str]])
 def _validate_registration(
     manifest_path: Path,
     cap_id: str,
-    options: dict[str, str | list[str]],
+    options: dict[str, str | list[str] | bool],
     entry: str,
 ) -> str | None:
     """Parse ``existing manifest + entry`` before anything is written.
@@ -825,10 +952,12 @@ def _validate_registration(
             )
     added = [c for c in caps if c.id == cap_id]
     expected = {k: v for k, v in options.items() if k != "harnesses"}
+    harnesses = options["harnesses"]
     if (
         len(added) != 1
         or added[0].options != expected
-        or list(added[0].harnesses) != list(options["harnesses"])
+        or not isinstance(harnesses, list)
+        or list(added[0].harnesses) != harnesses
     ):
         return f"refusing to register {cap_id!r}: the entry does not round-trip as requested"
     return None
@@ -864,6 +993,27 @@ def _cmd_register(args: argparse.Namespace) -> int:
             )
             return 2
 
+    # Every cred capability runs only its exact trusted_argv (Plan 012 section 5):
+    # refuse to write an entry that could never exec.
+    try:
+        if bool(args.trusted_argv) == bool(args.unqualified_exec):
+            raise SecretSourceConfigError(
+                f"{cap_id}: give exactly one of --trusted-argv <command...> (the one "
+                f"command that may receive this credential) or --unqualified-exec "
+                f"(any command may; doctor reports it as a warning)"
+            )
+        exec_options: dict[str, object] = (
+            {UNQUALIFIED_EXEC_OPTION: True}
+            if args.unqualified_exec
+            else {"trusted_argv": list(args.trusted_argv)}
+        )
+        validate_cred_trusted_argv(
+            Capability(cap_id, "cred", tuple(args.harnesses), exec_options)
+        )
+    except SecretSourceConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     manifest_path = resolve_manifest(getattr(args, "manifest", None))
 
     existing: list[Capability] = []
@@ -885,7 +1035,7 @@ def _cmd_register(args: argparse.Namespace) -> int:
             print(f"{cap_id}: already registered in {manifest_path}")
         return 0
 
-    options: dict[str, str | list[str]] = {"vault": args.vault}
+    options: dict[str, str | list[str] | bool] = {"vault": args.vault}
     if len(args.fields) == 1:
         options["field"] = args.fields[0]
     else:
@@ -894,6 +1044,10 @@ def _cmd_register(args: argparse.Namespace) -> int:
         options["env_prefix"] = args.env_prefix
     if args.vault_env:
         options["vault_env"] = args.vault_env
+    if args.unqualified_exec:
+        options[UNQUALIFIED_EXEC_OPTION] = True
+    else:
+        options["trusted_argv"] = list(args.trusted_argv)
     options["harnesses"] = args.harnesses
 
     if args.vault_env:
@@ -1274,6 +1428,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     doctor.add_argument("--json", action="store_true", help="emit JSON (suite health shape)")
+    doctor.add_argument(
+        "--boundary", action="store_true",
+        help="also check the blast-radius rule (read-only): kubeconfig reach, the VM's "
+             "Vault identity, declared admin SSH targets",
+    )
     doctor.set_defaults(func=_cmd_doctor)
 
     shims = sub.add_parser(
@@ -1333,7 +1492,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reg.add_argument("--env-prefix", help="env var prefix for injection (e.g. PYPI → PYPI_TOKEN)")
     reg.add_argument(
+        "--trusted-argv", nargs=argparse.REMAINDER, default=None, metavar="ARG",
+        help="the exact command `acb exec` may run with this credential: an absolute "
+             "executable path (not a shell or interpreter) followed by its arguments; "
+             "must be the last option (everything after it is the command)",
+    )
+    reg.add_argument(
         "--vault-env", help="per-plane AppRole .env file (for non-default access planes)"
+    )
+    reg.add_argument(
+        "--unqualified-exec", action="store_true",
+        help="instead of --trusted-argv: let `acb exec` hand this credential to any "
+             "command. For capabilities not yet moved to one exact command; doctor "
+             "reports each as a warning.",
     )
     reg.add_argument(
         "--harnesses", nargs="+", default=list(_STABLE_INSTALL_HARNESSES),

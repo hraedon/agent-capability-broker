@@ -26,12 +26,15 @@ harnesses = ["claude", "opencode"]
 # WI-010: declared naming contract for the vault source. env_prefix names the
 # fields EXAMPLE_CONTROL_USERNAME / EXAMPLE_CONTROL_PASSWORD so two
 # [username, password] capabilities compose in one checkout:
-#   acb exec cred:example-control cred:example-guest -- <command> [args...]
+#   acb exec cred:example-control cred:example-guest -- <exact trusted_argv>
+# Every cred capability needs an exact trusted_argv (absolute path, not a shell
+# or interpreter); composing requires the same argv on each capability.
 [capability."cred:example-control"]
 provider   = "cred"
 vault      = "kv/example/lab/control"
 fields     = ["username", "password"]
 env_prefix = "EXAMPLE_CONTROL"         # or inject = { username = "EX_USER", password = "EX_PASS" }
+trusted_argv = ["/opt/example/bin/lab-control", "--check"]
 harnesses  = ["claude", "opencode"]
 
 [capability."cred:example-guest"]
@@ -39,4 +42,43 @@ provider   = "cred"
 vault      = "kv/example/lab/guest"
 fields     = ["username", "password"]
 env_prefix = "EXAMPLE_GUEST"
+trusted_argv = ["/opt/example/bin/lab-control", "--check"]
 harnesses  = ["claude", "opencode"]
+
+# --- Manifest v2 (Plan 012 §5): issuer / delivery / assurance / decision --------
+# Every key is optional; the v1 entries above upconvert to
+# delivery = {rung = "env"} with assurance = "D0" and `doctor` reports them as
+# D0 (warn) until they are moved onto an issuing engine or an off-VM operation.
+# `harnesses` is advisory: the VM, not the harness, is the boundary.
+
+# A short-lived forge token minted off the VM and handed to git by a credential
+# helper. Effective D1; the declared floor makes doctor fail if that regresses.
+[capability."cred:forge-agent"]
+provider  = "cred"
+issuer    = { kind = "remote-mint", scopes = ["write:repository"], ttl = "15m" }
+delivery  = { rung = "helper", tool = "git", hosts = ["forge.example.invalid"] }
+assurance = "D1"
+harnesses = ["claude", "codex", "opencode"]
+
+# A Vault SSH CA certificate (10 minutes) offered through an ssh-agent.
+[capability."cred:lab-ssh"]
+provider  = "cred"
+issuer    = { kind = "vault-ssh-ca", mount = "ssh", role = "lab-agent", ttl = "10m" }
+delivery  = { rung = "helper", tool = "ssh-agent" }
+assurance = "D1"
+harnesses = ["claude", "opencode"]
+
+# A typed operation run off the VM; the value never enters the VM. `decision`
+# is valid only for rung = "remote-op".
+[capability."cred:ad-query"]
+provider  = "cred"
+issuer    = { kind = "vault-ldap-library", set = "ad-readers" }
+delivery  = { rung = "remote-op", operation = "ldap.search" }
+decision  = "auto"
+assurance = "H1+D1"
+harnesses = ["claude"]
+
+# Read by `acb doctor --boundary`. Both keys are optional.
+[boundary]
+vault_namespace   = "example-vault"
+ssh_admin_targets = ["hypervisor-01.example.invalid"]

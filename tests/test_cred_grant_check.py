@@ -17,7 +17,9 @@ from agent_capability_broker.providers import CredProvider
 
 CAP = Capability(
     id="cred:svc-bot", provider="cred", harnesses=("opencode",),
-    options={"vault": "kv/example/ad/svc-bot", "fields": ["username"]},
+    options={
+        "vault": "kv/example/ad/svc-bot", "fields": ["username"], "unqualified_exec": True,
+    },
 )
 API_PATH = "kv/data/example/ad/svc-bot"
 

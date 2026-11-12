@@ -14,7 +14,9 @@ from agent_capability_broker.providers import CredProvider, _render_cred_shim, a
 
 CAP = Capability(
     id="cred:svc-bot", provider="cred", harnesses=("agy",),
-    options={"vault": "kv/example/ad/svc-bot", "fields": ["username"]},
+    options={
+        "vault": "kv/example/ad/svc-bot", "fields": ["username"], "unqualified_exec": True,
+    },
 )
 
 
@@ -88,7 +90,7 @@ def test_install_harness_accepts_agy(config_dir: Path, monkeypatch: pytest.Monke
     manifest = config_dir.parent / "capabilities.toml"
     manifest.write_text(
         '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
-        'from_env="ACB_TEST_SECRET"\nharnesses=["agy"]\n',
+        'from_env="ACB_TEST_SECRET"\nunqualified_exec=true\nharnesses=["agy"]\n',
         encoding="utf-8",
     )
     assert main(["install-harness", "agy", "-m", str(manifest)]) == 0

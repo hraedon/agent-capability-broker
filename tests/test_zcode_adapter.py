@@ -18,6 +18,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from _childpy import TRUSTED_TOML
 
 from agent_capability_broker.adapters import ZcodeAdapter
 from agent_capability_broker.cli import main
@@ -254,7 +255,7 @@ def test_zcode_is_a_known_harness_and_registered_adapter() -> None:
 def test_manifest_accepts_zcode_harness_list(tmp_path: Path) -> None:
     m = tmp_path / "capabilities.toml"
     m.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["zcode"]\n',
         encoding="utf-8",
     )
@@ -328,7 +329,7 @@ def test_e2e_add_mcp_applies_to_zcode(
 def _zcode_manifest(tmp_path: Path) -> Path:
     m = tmp_path / "capabilities.toml"
     m.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["zcode"]\n',
         encoding="utf-8",
     )
@@ -395,7 +396,7 @@ def test_install_harness_all_expands_to_zcode(
     monkeypatch.setenv("ACB_TEST_SECRET", "p@ss-not-leaked")
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_TEST_SECRET"\nharnesses=["claude","opencode","zcode"]\n',
         encoding="utf-8",
     )

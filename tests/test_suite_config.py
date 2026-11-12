@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from _childpy import TRUSTED_TOML
 
 from agent_capability_broker import cred_vault
 from agent_capability_broker.cli import main
@@ -220,7 +221,7 @@ def test_doctor_json_suite_shape(
 ) -> None:
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="NOT_SET"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
@@ -252,7 +253,7 @@ def test_doctor_json_no_secret_leaked(
     monkeypatch.setenv("ACB_SECRET", secret)
     manifest = tmp_path / "capabilities.toml"
     manifest.write_text(
-        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n'
+        '[capability."cred:svc-bot"]\nprovider="cred"\nsource="env"\n' f"{TRUSTED_TOML}"
         'from_env="ACB_SECRET"\nharnesses=["opencode"]\n',
         encoding="utf-8",
     )
