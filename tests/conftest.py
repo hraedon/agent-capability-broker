@@ -14,3 +14,11 @@ def _no_live_grant_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     not be asked". Tests of the check itself call the function they imported,
     or patch it again."""
     monkeypatch.setattr(cred_vault, "read_granted", lambda cap, **_: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_agy_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep the agy adapter off the developer's real ``~/.gemini/config``."""
+    monkeypatch.setenv("ACB_AGY_CONFIG_DIR", str(tmp_path_factory.mktemp("agy") / "absent"))

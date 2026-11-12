@@ -1308,7 +1308,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ih.add_argument(
         "harness",
-        help="harness to provision (claude, opencode, zcode, codex, hermes, or all)",
+        help="harness to provision (claude, opencode, zcode, codex, hermes, agy, or all)",
     )
     ih.add_argument(
         "-m", "--manifest", default=None,

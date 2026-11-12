@@ -115,6 +115,12 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> type[_Recorder]:
     return _Recorder
 
 
+def _names(message: str, path: Path) -> bool:
+    """Whether `message` names `path`. The refusals quote the path with repr(),
+    which doubles the backslashes of a Windows path."""
+    return str(path) in message or repr(str(path))[1:-1] in message
+
+
 # ---------------------------------------------------------------------------
 # The defect: an ambient ~/.vault-token must not make a capability reachable
 # ---------------------------------------------------------------------------
@@ -241,7 +247,7 @@ class TestPartialAppRoleFailsClosed:
         assert "no SecretID" in msg
         assert "VAULT_SECRET_ID_FILE" in msg
         assert "Refusing to fall back to VAULT_TOKEN" in msg
-        assert str(plane) in msg, "the refusal must name the file to edit"
+        assert _names(msg, plane), "the refusal must name the file to edit"
         assert recorder.instances[0].logins == [], "no login may be attempted"
 
     def test_partial_material_does_not_downgrade_to_an_ambient_token(
@@ -304,7 +310,7 @@ class TestPartialAppRoleFailsClosed:
         with pytest.raises(RuntimeError) as exc:
             cred_vault.reachable(CAP, vault_env=str(plane))
         assert "VAULT_SECRET_ID_FILE" in str(exc.value)
-        assert str(missing) in str(exc.value)
+        assert _names(str(exc.value), missing)
         assert "does not exist" in str(exc.value)
 
     def test_an_unreadable_secret_id_file_refuses(

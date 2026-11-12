@@ -170,6 +170,13 @@ interop proof: a fresh ZCode session's skill discovery surfaced every rendered
 shim, descriptions matching the on-disk SKILL.md exactly (mirroring the Codex
 rule, which Codex itself has not yet satisfied).
 
+`agy` (the Antigravity CLI) is an explicit target via the `AgyAdapter`: credential
+discovery skills are Claude-shaped `skills/<name>/SKILL.md` in its config directory
+(`~/.gemini/config`; `ACB_AGY_CONFIG_DIR` overrides). MCP servers are read from
+`mcp_config.json` for `doctor` and never written, so an e2e capability declared for
+agy is an honest unsupported skip. It stays out of the stable `all` expansion until a
+live interop proof.
+
 Beyond the MCP capability layer, each adapter also reads its **command/skill shim
 surface** (`command_shims()`): opencode `command/<name>.md` stems and
 Claude/Codex/ZCode `skills/<name>/SKILL.md` dirs (Codex's reserved `.system`

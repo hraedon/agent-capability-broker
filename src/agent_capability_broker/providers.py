@@ -28,6 +28,7 @@ from typing import Protocol
 
 from . import provenance
 from .adapters import (
+    AgyAdapter,
     ClaudeAdapter,
     CodexAdapter,
     HermesAdapter,
@@ -1144,7 +1145,7 @@ capability is present and the broker reachable; `acb reconcile` (re)renders this
 `acb install-harness {harness}` is the bootstrap step that renders all shims for
 this harness at once.
 """
-    if harness in ("claude", "hermes", "codex", "zcode"):
+    if harness in ("claude", "hermes", "codex", "zcode", "agy"):
         front = f'---\nname: {shim}\ndescription: "{desc}"\n---\n\n'
     else:
         front = f'---\ndescription: "{desc}"\n---\n\n'
@@ -1262,7 +1263,9 @@ class CredProvider:
         content = str(action.payload.get("content", ""))
         if isinstance(adapter, OpencodeAdapter):
             res = adapter.write_command_shim(action.target, content)
-        elif isinstance(adapter, ClaudeAdapter | HermesAdapter | CodexAdapter | ZcodeAdapter):
+        elif isinstance(
+            adapter, ClaudeAdapter | HermesAdapter | CodexAdapter | ZcodeAdapter | AgyAdapter
+        ):
             res = adapter.write_skill_shim(action.target, content)
         else:
             return ActionResult(action, "skipped", "shim rendering not supported for this harness")
@@ -1525,4 +1528,5 @@ def adapters() -> dict[str, HarnessAdapter]:
         "hermes": HermesAdapter(),
         "codex": CodexAdapter(),
         "zcode": ZcodeAdapter(),
+        "agy": AgyAdapter(),
     }

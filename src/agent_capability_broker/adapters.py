@@ -592,6 +592,67 @@ class ZcodeAdapter:
         return _create_file(self.shims_path / name / "SKILL.md", content)
 
 
+class AgyAdapter:
+    """agy (the Antigravity CLI): skills at ``~/.gemini/config/skills/<name>/SKILL.md``.
+
+    agy keeps its user configuration under ``~/.gemini/config``: the same
+    ``SKILL.md`` skill format as Claude Code in ``skills/``, and MCP servers in
+    ``mcp_config.json`` under ``mcpServers``. Only credential discovery skills
+    are written. MCP wiring is read for ``doctor`` but never written: the
+    entry shape agy expects has not been proven against a live client, so an
+    ``e2e`` capability declared for agy is an honest "unsupported" skip rather
+    than a guessed config edit.
+
+    ``ACB_AGY_CONFIG_DIR`` points at the config directory for tests/isolation.
+    """
+
+    name = "agy"
+
+    def __init__(self, config_dir: Path | None = None) -> None:
+        env = os.environ.get("ACB_AGY_CONFIG_DIR")
+        self.config_dir = config_dir or (
+            Path(env) if env else Path.home() / ".gemini" / "config"
+        )
+
+    @property
+    def config_path(self) -> Path:
+        return self.config_dir / "mcp_config.json"
+
+    @property
+    def shims_path(self) -> Path:
+        """Where agy keeps skill shims: ``skills/`` in its config directory."""
+        return self.config_dir / "skills"
+
+    @property
+    def vault_env_path(self) -> Path:
+        """Where this harness's Vault identity ``.env`` lives: ``vault.env`` in
+        the config directory (never ``.env``, which dotenv tools auto-source)."""
+        return self.config_dir / "vault.env"
+
+    def available(self) -> bool:
+        """agy is provisionable iff it has been initialised on this host."""
+        return self.config_dir.is_dir()
+
+    def mcp_servers(self) -> dict[str, McpServer]:
+        return _servers_from(_load_json(self.config_path).get("mcpServers"))
+
+    def command_shims(self) -> set[str]:
+        """Skill names agy advertises: ``skills/<name>/SKILL.md`` dirs. Read-only;
+        dot-directories are excluded and a missing ``skills/`` is an empty set."""
+        skills = self.shims_path
+        if not skills.is_dir():
+            return set()
+        return {
+            d.name
+            for d in skills.iterdir()
+            if not d.name.startswith(".") and (d / "SKILL.md").is_file()
+        }
+
+    def write_skill_shim(self, name: str, content: str) -> WriteResult:
+        """Render a skill shim at ``skills/<name>/SKILL.md``. Create-only."""
+        return _create_file(self.shims_path / name / "SKILL.md", content)
+
+
 def _load_toml(path: Path) -> dict[str, object]:
     """Load a TOML config file, returning ``{}`` on missing/corrupt (mirrors
     ``_load_json``).  ``tomllib`` is stdlib (Python >= 3.11); it parses bytes, so
