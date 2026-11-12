@@ -144,13 +144,18 @@ Adapters must treat existing configs as **secret-bearing**: read for diffing,
 write only via the gated act path (backup-first, no secret clobber).
 
 `codex` is part of the closed suite harness set. `install-harness codex` renders
-cred discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md` (Codex's own
+cred discovery skills into `$HOME/.agents/skills/<name>/SKILL.md` (Codex's own
 skill format), backup-first and create-only — the `CodexAdapter` (Plan 008
 WI-3.1). It stays **out of the stable `all` expansion** (Decision 2) until the
 live interop proof (Plan 007 WI-3.1) lands; `CODEX_HOME`/`ACB_CODEX_HOME` select
 the config root. Codex MCP writes (e2e provider) remain an honest `unsupported`
 skip. Hermes remains a component-private explicit target and is not part of the
 suite's stable `all` expansion.
+
+The desktop workflow plugin is the bounded `plugins/agent-capability-broker`
+bundle, exposed by `.agents/plugins/marketplace.json`; see
+`docs/desktop-codex.md`. `ACB_CODEX_SKILLS` independently selects the shared
+skill directory for tests. Config-root overrides do not relocate user skills.
 
 `zcode` (the ZCode client) is a public explicit target via the `ZcodeAdapter`:
 MCP servers live under a **nested** `mcp.servers` key in

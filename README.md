@@ -1,5 +1,7 @@
 # agent-capability-broker
 
+Desktop Codex: [install the workflow plugin and credential discovery skills](docs/desktop-codex.md).
+
 > **Reactivated 2026-10-08** (owner decision; was frozen 2026-10-04). First
 > feature since the freeze: the ZCode harness adapter (`zcode`) — cred
 > discovery shims and e2e MCP wiring, mirroring the Codex adapter's posture.
@@ -66,8 +68,8 @@ and reconciles reality to it.
 - **Harness adapters** that read and render each harness's wiring (Claude Code
   `settings.json` + skills; opencode `opencode.json` MCP/commands; ZCode's
   nested `~/.zcode/cli/config.json` → `mcp.servers` + `~/.zcode/skills/`).
-  `codex` is recognized by the closed suite contract but currently returns
-  explicit, non-zero `unsupported` from `install-harness` until Plan 007 lands.
+  `codex` supports credential discovery skills as an explicit target; browser
+  MCP mutation remains unsupported. See [desktop setup](docs/desktop-codex.md).
   Hermes remains an explicit component-private target. Direct
   `install-harness all` expands the currently supported public set
   (Claude + OpenCode + ZCode, which joined 2026-10-09 after its live interop

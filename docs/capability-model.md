@@ -158,7 +158,7 @@ First two providers:
 The closed manifest set recognizes `claude`, `opencode`, `codex`, `zcode`, and
 the component-private `hermes` target. The Codex adapter (`CodexAdapter`, Plan
 008 WI-3.1) is implemented for the cred provider: `acb install-harness codex`
-renders `cred:<id>` discovery skills into `$CODEX_HOME/skills/<name>/SKILL.md`
+renders `cred:<id>` discovery skills into `$HOME/.agents/skills/<name>/SKILL.md`
 (Codex's own `SKILL.md` format), create-only and preserving the user's config
 and existing skills (including the reserved `.system` tree). The Codex e2e/MCP
 write path is honestly `unsupported` (a named skip), not a false green. The
@@ -190,7 +190,7 @@ exposed_tools()      -> set[str]              # what the harness currently adver
 - **opencode** — reads `~/.config/opencode/opencode.json` (`mcp` blocks,
   `command` shims).
 - **codex** — reads `$CODEX_HOME/config.toml` (`[mcp_servers.*]`, via stdlib
-  `tomllib`) and `$CODEX_HOME/skills/<name>/SKILL.md` skills; writes cred
+  `tomllib`) and `$HOME/.agents/skills/<name>/SKILL.md` skills; writes cred
   discovery skills only (create-only), never Codex config, auth, or the
   `.system` skill tree.
 - **zcode** — reads `~/.zcode/cli/config.json` (`mcp.servers.*`, *nested* under

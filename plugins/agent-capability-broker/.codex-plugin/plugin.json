@@ -1,0 +1,17 @@
+{
+  "name": "agent-capability-broker",
+  "version": "0.1.0",
+  "description": "Inspect capability availability and run tools with brokered credentials or browsers through acb.",
+  "author": {"name": "hraedon"},
+  "homepage": "https://github.com/hraedon/agent-capability-broker",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Capability Broker",
+    "shortDescription": "Check capabilities and broker tool access.",
+    "longDescription": "Use the installed acb CLI to inspect harness wiring and launch manifest-qualified tools with credentials or browser access.",
+    "developerName": "hraedon",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Check which capabilities are available to Codex.", "Run a tool with a brokered capability."]
+  }
+}
