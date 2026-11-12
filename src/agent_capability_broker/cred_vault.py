@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 
 from .model import Capability, _user_config_root, suite_config_dir
-from .secret_sources import SecretSourceConfigError
+from .secret_sources import SecretSourceConfigError, is_helper_issuer
 
 _K8S_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
@@ -477,9 +477,18 @@ def read_granted(
     declared and its plane can log in while the identity's policy simply does
     not list the path. A token self-lookup cannot see that; `exec` would then
     fail at use time with a 403.
+
+    A helper-rung ``vault-k8s-token`` capability has no KV path: the question is
+    whether the identity may ``update`` (or ``create`` / ``root``) on
+    ``<mount>/creds/<role>``, asked the same way and with the same contract.
     """
+    helper = is_helper_issuer(cap)
     path = cap.options.get("vault")
-    if not isinstance(path, str) or not path:
+    creds_path = _creds_api_path(cap) if helper else None
+    if helper:
+        if creds_path is None:
+            return None
+    elif not isinstance(path, str) or not path:
         return None
     try:
         import hvac
@@ -491,15 +500,31 @@ def read_granted(
         # `token=""`, never `None` (see `reachable`).
         client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN") or "")
         _authenticate(client, env, source=_auth_source(env, vault_env))
-        mount, secret_path = _split_mount(path)
-        api_path = f"{mount}/data/{secret_path}"
+        if creds_path is not None:
+            api_path = creds_path
+        else:
+            mount, secret_path = _split_mount(str(path))
+            api_path = f"{mount}/data/{secret_path}"
         resp = client.adapter.post("/v1/sys/capabilities-self", json={"paths": [api_path]})
     except Exception:
         return None
     caps = _capabilities_in(resp, api_path)
     if caps is None:
         return None
+    if helper:
+        return bool({"update", "create", "root"} & set(caps))
     return "read" in caps or "root" in caps
+
+
+def _creds_api_path(cap: Capability) -> str | None:
+    """``<mount>/creds/<role>`` for a ``vault-k8s-token`` issuer, or `None` when
+    the declaration is not a usable pair of relative path segments."""
+    issuer = cap.issuer or {}
+    mount = issuer.get("mount", "kubernetes")
+    role = issuer.get("role")
+    if not isinstance(mount, str) or not isinstance(role, str) or not mount or not role:
+        return None
+    return f"{mount}/creds/{role}"
 
 
 def _capabilities_in(resp: object, api_path: str) -> list[str] | None:

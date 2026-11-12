@@ -41,6 +41,7 @@ from .secret_sources import (
     SecretSourceError,
     SecretSourceKind,
     SecretSourceUnavailable,
+    is_helper_issuer,
     resolve_suite,
     source_kind,
     suite_spec,
@@ -1187,6 +1188,19 @@ this harness at once.
     return front + body
 
 
+def helper_refusal(cap: Capability) -> str:
+    """Why `acb exec` will not run a helper-rung capability, and what to run."""
+    if cap.delivery.get("tool") == "kubectl":
+        return (
+            f"{cap.id}: delivery rung is 'helper', which has no child command to "
+            f"inject into — use the helper: acb kube-token {cap.id}"
+        )
+    return (
+        f"{cap.id}: delivery rung is 'helper', which has no child command to inject "
+        f"into — use the helper for tool {cap.delivery.get('tool')!r}, not acb exec"
+    )
+
+
 class CredProvider:
     """Inject-only AD/service-account credentials from closed source kinds.
 
@@ -1233,6 +1247,7 @@ class CredProvider:
                 Status.UNKNOWN,
                 f"suite provider(s) {providers!r} available; values intentionally unproven",
             )
+        helper = is_helper_issuer(cap)
         try:
             from . import cred_vault  # lazy: keeps the [cred] extra optional
 
@@ -1245,6 +1260,22 @@ class CredProvider:
             granted = cred_vault.read_granted(cap, vault_env=vault_env)
         except Exception:  # best-effort, like the probe above
             granted = None
+        if helper:
+            target = "update on the declared creds path"
+            if granted is False:
+                return (
+                    Status.PRESENT_BROKEN,
+                    f"broker reachable, but this plane's identity is not granted {target} "
+                    "(capabilities-self; no credential minted): add it to the identity's "
+                    "Vault policy",
+                )
+            if granted:
+                return (
+                    Status.PRESENT_OK,
+                    f"broker reachable (token self-lookup); {target} granted "
+                    "(capabilities-self; no credential minted)",
+                )
+            return Status.PRESENT_OK, "broker reachable (token self-lookup)"
         if granted is False:
             return (
                 Status.PRESENT_BROKEN,
@@ -1265,6 +1296,10 @@ class CredProvider:
         problem = _trusted_argv_problem(cap)
         if problem is not None:
             return Verdict(cap.id, harness, Status.PRESENT_BROKEN, problem)
+        if is_helper_issuer(cap):
+            # kubectl reaches this through kubeconfig, not a skill: no discovery shim.
+            status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
+            return Verdict(cap.id, harness, status, f"helper rung (acb kube-token); {detail}")
         if shim not in adapter.command_shims():
             return Verdict(
                 cap.id, harness, Status.ABSENT,
@@ -1284,6 +1319,14 @@ class CredProvider:
                 cap.id, harness, "manual", shim,
                 f"manifest error for {cap.id}: {problem} — fix the manifest, not a shim",
             )]
+        if is_helper_issuer(cap):
+            status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
+            if status is Status.PRESENT_BROKEN:
+                return [Action(
+                    cap.id, harness, "manual", shim,
+                    f"broker unreachable for {cap.id}: {detail} — fix Vault/auth, not a shim",
+                )]
+            return []
         if shim not in adapter.command_shims():
             content = _render_cred_shim(cap, harness, shim, _vault_env_path(cap, adapter))
             return [Action(
@@ -1356,6 +1399,8 @@ class CredProvider:
         """
         if not argv:
             raise ValueError("exec requires a command after '--'")
+        if cap.rung == "helper":
+            raise RuntimeError(helper_refusal(cap))
 
         source = source_kind(cap)
         # Every cred source runs only its exact manifest-qualified command

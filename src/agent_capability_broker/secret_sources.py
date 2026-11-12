@@ -188,9 +188,35 @@ def unqualified_exec(cap: Capability) -> bool:
     return True
 
 
+def is_helper_issuer(cap: Capability) -> bool:
+    """A cred capability served by ``acb kube-token`` rather than ``acb exec``:
+    ``rung = "helper"`` with a ``vault-k8s-token`` issuer.
+
+    It has no child command, so the exact-command rule does not apply to it (and
+    ``acb exec`` refuses it outright). Pure; reads nothing."""
+    return (
+        cap.provider == "cred"
+        and cap.rung == "helper"
+        and cap.issuer_kind == "vault-k8s-token"
+    )
+
+
 def validate_cred_trusted_argv(cap: Capability) -> tuple[str, ...]:
     """Validate a cred capability's exec declaration (any source): its exact
-    ``trusted_argv``, or the explicit unqualified opt-out (returned as ``()``)."""
+    ``trusted_argv``, or the explicit unqualified opt-out (returned as ``()``).
+
+    A helper-rung issuer capability (`is_helper_issuer`) is exempt: it runs no
+    child, so it needs neither, and declaring either is a manifest error."""
+    if is_helper_issuer(cap):
+        declared = [
+            k for k in ("trusted_argv", UNQUALIFIED_EXEC_OPTION) if k in cap.options
+        ]
+        if declared:
+            raise SecretSourceConfigError(
+                f"{cap.id}: a helper-rung issuer capability runs no child command; "
+                f"remove options.{' / options.'.join(declared)}"
+            )
+        return ()
     if unqualified_exec(cap):
         return ()
     if "trusted_argv" not in cap.options:
@@ -340,6 +366,7 @@ __all__ = [
     "SecretSourceKind",
     "SecretSourceUnavailable",
     "SuiteSecretSpec",
+    "is_helper_issuer",
     "resolve_suite",
     "source_kind",
     "suite_spec",

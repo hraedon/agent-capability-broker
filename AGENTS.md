@@ -118,6 +118,14 @@ A provider implements: `inspect` (read-only status for a capability×harness),
   components on one host disagreeing about that host's posture is worse than
   either choice alone. acb does **not** unwrap response-wrapped SecretIDs
   (`VAULT_SECRET_ID_RESPONSE_WRAPPED` is a named refusal, not a Vault 400).
+  **Standalone kubectl helper (0.5.0).** A cred capability with a
+  `vault-k8s-token` `issuer` and `delivery = {rung = "helper", tool = "kubectl"}`
+  is served by `acb kube-token <id>` (no daemon, cross-platform), not `acb exec`
+  (which refuses it). It has no child command, so it is exempt from the
+  exact-command rule (declaring `trusted_argv`/`unqualified_exec` on it is an
+  error) and needs no discovery shim; `doctor` checks `update` on
+  `<mount>/creds/<role>`. Failures print the exception class name only. See
+  `docs/broker.md`.
 - **`e2e`** — provisions/locates a Playwright browser (local install or a remote
   endpoint) and exposes it to a harness without a fragile per-session `npx` MCP.
   `exec` brokers the resolved browser into the child (`ACB_E2E_EXECUTABLE` /

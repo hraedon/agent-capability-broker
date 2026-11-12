@@ -249,6 +249,49 @@ Not protected:
 - `vault-kv` values are standing secrets (`D0`). Revoking the checkout does not
   revoke the value.
 
+## Standalone kubectl credential (no daemon)
+
+`acb kube-token <capability-id> [-m MANIFEST]` is a cross-platform (Windows and
+Linux) kubectl exec-credential plugin that needs no daemon and no socket. It
+authenticates to Vault the way `acb exec` does for a vault-sourced credential
+(AppRole from the plane file named by `$ACB_VAULT_ENV`, the `token=""` and
+fail-closed invariants), makes one write to `<mount>/creds/<role>`, and prints
+one `ExecCredential` JSON line.
+
+```toml
+# Placeholders only. No `trusted_argv` / `unqualified_exec`: there is no child.
+[capability."cred:example-k8s"]
+provider  = "cred"
+harnesses = ["claude"]
+issuer    = { kind = "vault-k8s-token", mount = "kubernetes", role = "example-role",
+              namespace = "example-ns", ttl = "10m" }   # ttl <= 15m; audiences, cluster_role_binding optional
+delivery  = { rung = "helper", tool = "kubectl" }
+```
+
+```yaml
+# kubeconfig
+users:
+  - name: example-agent
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1
+        command: acb
+        args: ["kube-token", "cred:example-k8s"]
+        env:
+          - name: ACB_VAULT_ENV
+            value: /path/to/vault.env
+        interactiveMode: Never
+```
+
+The identity needs only `update` on `kubernetes/creds/example-role`;
+`acb doctor` checks that grant through `sys/capabilities-self`. Unlike the
+daemon path, there is no per-checkout child token and no checkout registry:
+nothing is revoked afterwards, the lease expires on its own, and the
+expiry reported to kubectl is the lease minus 30 seconds. On failure nothing is
+printed to stdout, stderr carries only the exception class name, and the exit
+code is 1 (2 for a manifest or usage problem). `acb exec` refuses a helper-rung
+capability and points here.
+
 ## Running it (manual, for now)
 
 ```bash

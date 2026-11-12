@@ -41,6 +41,7 @@ from .providers import (
     _assert_safe_path_component,
     adapters,
     exec_composed,
+    helper_refusal,
 )
 from .secret_sources import (
     UNQUALIFIED_EXEC_OPTION,
@@ -655,6 +656,10 @@ def _cmd_exec_raw(raw: list[str]) -> int:
         cap = next((c for c in caps if c.id == cap_id), None)
         if cap is None:
             print(f"error: capability {cap_id!r} not in manifest", file=sys.stderr)
+            return 2
+        if cap.rung == "helper":
+            # No child command to inject into: refused before anything is resolved.
+            print(f"error: {helper_refusal(cap)}", file=sys.stderr)
             return 2
         wanted.append(cap)
 
@@ -1417,6 +1422,13 @@ def _cmd_onboard(args: argparse.Namespace) -> int:
         )
 
 
+def _cmd_kube_token(args: argparse.Namespace) -> int:
+    """`acb kube-token` — exit 0 success, 1 operational, 2 usage/config."""
+    from . import kube_token
+
+    return kube_token.run(args.capability, args.manifest)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -1460,6 +1472,18 @@ def build_parser() -> argparse.ArgumentParser:
         "exec", help="run a command with one or more capabilities injected (never surfaced)"
     )
     ex.add_argument("tokens", nargs=argparse.REMAINDER, help=_EXEC_USAGE)
+
+    kt = sub.add_parser(
+        "kube-token",
+        help="print a kubectl ExecCredential minted by Vault's Kubernetes secrets engine "
+             "(standalone, no daemon)",
+    )
+    kt.add_argument("capability", help="cred capability id (helper rung, tool kubectl)")
+    kt.add_argument(
+        "-m", "--manifest", default=None,
+        help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
+    )
+    kt.set_defaults(func=_cmd_kube_token)
 
     ih = sub.add_parser(
         "install-harness",
