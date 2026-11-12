@@ -376,6 +376,61 @@ def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = Non
     return bool(client.is_authenticated())  # token self-lookup; no secret read
 
 
+def read_granted(
+    cap: Capability, *, vault_env: str | os.PathLike[str] | None = None
+) -> bool | None:
+    """Whether this access plane's identity may read the capability's declared
+    KV v2 path, asked through `sys/capabilities-self`. The secret itself is
+    **not** read (that would be a use, spine §4): Vault answers from policy.
+
+    `True`/`False` is Vault's answer. `None` means the question could not be
+    asked (no declared path, no `[cred]` extra, auth failed, an unexpected
+    reply) and the caller must not turn that into a verdict either way.
+
+    Why it exists: with one identity per host and harness, a capability can be
+    declared and its plane can log in while the identity's policy simply does
+    not list the path. A token self-lookup cannot see that; `exec` would then
+    fail at use time with a 403.
+    """
+    path = cap.options.get("vault")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        import hvac
+
+        env = _vault_env(vault_env)
+        addr = env.get("VAULT_ADDR")
+        if not addr:
+            return None
+        # `token=""`, never `None` (see `reachable`).
+        client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN") or "")
+        _authenticate(client, env, source=_auth_source(env, vault_env))
+        mount, secret_path = _split_mount(path)
+        api_path = f"{mount}/data/{secret_path}"
+        resp = client.adapter.post("/v1/sys/capabilities-self", json={"paths": [api_path]})
+    except Exception:
+        return None
+    caps = _capabilities_in(resp, api_path)
+    if caps is None:
+        return None
+    return "read" in caps or "root" in caps
+
+
+def _capabilities_in(resp: object, api_path: str) -> list[str] | None:
+    """The capability list for `api_path` out of a capabilities-self reply, or
+    `None` when the reply has no recognisable list (never guessed)."""
+    if not isinstance(resp, dict):
+        return None
+    for holder in (resp.get("data"), resp):
+        if not isinstance(holder, dict):
+            continue
+        for key in (api_path, "capabilities"):
+            found = holder.get(key)
+            if isinstance(found, list) and all(isinstance(c, str) for c in found):
+                return list(found)
+    return None
+
+
 def resolve(cap: Capability) -> dict[str, str]:
     """Read the capability's secret field(s) from Vault (KV v2).
 

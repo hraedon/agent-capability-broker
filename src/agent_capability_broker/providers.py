@@ -1178,9 +1178,26 @@ class CredProvider:
             ok = cred_vault.reachable(cap, vault_env=vault_env)
         except Exception as exc:  # best-effort: never let a probe break doctor
             return Status.UNKNOWN, f"broker reachability not checked ({exc})"
-        if ok:
-            return Status.PRESENT_OK, "broker reachable (token self-lookup)"
-        return Status.PRESENT_BROKEN, "broker unreachable (token self-lookup failed)"
+        if not ok:
+            return Status.PRESENT_BROKEN, "broker unreachable (token self-lookup failed)"
+        try:
+            granted = cred_vault.read_granted(cap, vault_env=vault_env)
+        except Exception:  # best-effort, like the probe above
+            granted = None
+        if granted is False:
+            return (
+                Status.PRESENT_BROKEN,
+                "broker reachable, but this plane's identity is not granted read on the "
+                "declared path (capabilities-self; value not read): add the path to the "
+                "identity's Vault policy",
+            )
+        if granted:
+            return (
+                Status.PRESENT_OK,
+                "broker reachable (token self-lookup); declared path granted "
+                "(capabilities-self; value not read)",
+            )
+        return Status.PRESENT_OK, "broker reachable (token self-lookup)"
 
     def inspect(self, cap: Capability, harness: str, adapter: HarnessAdapter) -> Verdict:
         shim = _cred_shim_name(cap)
