@@ -140,6 +140,10 @@ def _harness_env(
     monkeypatch.setenv("ACB_CLAUDE_SETTINGS", str(tmp_path / "no-claude.json"))
     monkeypatch.setenv("ACB_HERMES_CONFIG", str(tmp_path / "no-hermes.yaml"))
     monkeypatch.setenv("ACB_ZCODE_CONFIG", str(tmp_path / "no-zcode.json"))
+    # Codex reads the shared ~/.agents/skills: without these the audit sees the
+    # developer's real cred-* skills and reports them as rogue.
+    monkeypatch.setenv("ACB_CODEX_HOME", str(tmp_path / "no-codex"))
+    monkeypatch.setenv("ACB_CODEX_SKILLS", str(tmp_path / "no-codex-skills"))
     monkeypatch.setenv("ACB_STATE_DIR", str(tmp_path / "state"))
     return root
 
