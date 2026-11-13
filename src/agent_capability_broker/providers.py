@@ -1195,6 +1195,11 @@ def helper_refusal(cap: Capability) -> str:
             f"{cap.id}: delivery rung is 'helper', which has no child command to "
             f"inject into — use the helper: acb kube-token {cap.id}"
         )
+    if cap.delivery.get("tool") == "git":
+        return (
+            f"{cap.id}: delivery rung is 'helper', which has no child command to "
+            f"inject into — use the helper: acb git-credential {cap.id} get"
+        )
     return (
         f"{cap.id}: delivery rung is 'helper', which has no child command to inject "
         f"into — use the helper for tool {cap.delivery.get('tool')!r}, not acb exec"
@@ -1247,7 +1252,7 @@ class CredProvider:
                 Status.UNKNOWN,
                 f"suite provider(s) {providers!r} available; values intentionally unproven",
             )
-        helper = is_helper_issuer(cap)
+        helper = is_helper_issuer(cap) and cap.issuer_kind == "vault-k8s-token"
         try:
             from . import cred_vault  # lazy: keeps the [cred] extra optional
 
@@ -1297,9 +1302,10 @@ class CredProvider:
         if problem is not None:
             return Verdict(cap.id, harness, Status.PRESENT_BROKEN, problem)
         if is_helper_issuer(cap):
-            # kubectl reaches this through kubeconfig, not a skill: no discovery shim.
+            # Native tools reach helpers directly: no discovery shim.
             status, detail = self._reachability(cap, vault_env=_vault_env_path(cap, adapter))
-            return Verdict(cap.id, harness, status, f"helper rung (acb kube-token); {detail}")
+            verb = "git-credential" if cap.delivery.get("tool") == "git" else "kube-token"
+            return Verdict(cap.id, harness, status, f"helper rung (acb {verb}); {detail}")
         if shim not in adapter.command_shims():
             return Verdict(
                 cap.id, harness, Status.ABSENT,

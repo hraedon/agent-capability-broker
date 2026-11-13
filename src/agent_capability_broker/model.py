@@ -347,18 +347,30 @@ def parse_manifest(path: Path) -> list[Capability]:
         options = {
             k: v for k, v in body.items() if k not in {"provider", "harnesses", *_V2_KEYS}
         }
-        caps.append(
-            Capability(
-                id=cap_id,
-                provider=str(provider),
-                harnesses=tuple(harnesses),
-                options=options,
-                issuer=issuer,
-                delivery=delivery,
-                declared_assurance=assurance,
-                decision=decision,
-            )
+        cap = Capability(
+            id=cap_id,
+            provider=str(provider),
+            harnesses=tuple(harnesses),
+            options=options,
+            issuer=issuer,
+            delivery=delivery,
+            declared_assurance=assurance,
+            decision=decision,
         )
+        if (
+            cap.provider == "cred" and cap.rung == "helper"
+            and cap.delivery.get("tool") == "git" and cap.issuer_kind != "vault-k8s-token"
+        ):
+            # A git helper has no child. Validate the exec prohibition here,
+            # but keep standalone-only constraints out of the shared parser:
+            # existing daemon declarations may use multiple hosts, other
+            # issuers, or a literal delivery.username fallback.
+            if "trusted_argv" in options or "unqualified_exec" in options:
+                raise ManifestError(
+                    f"{cap_id}: helper-rung git credentials cannot declare "
+                    "trusted_argv or unqualified_exec"
+                )
+        caps.append(cap)
     return caps
 
 

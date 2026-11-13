@@ -168,6 +168,18 @@ harnesses = ["claude", "codex", "opencode"]    # advisory
 
 ## 4. Status
 
+**Standalone native helpers.** A `cred` with `delivery.rung = "helper"` is
+served directly by its tool's protocol rather than a child command:
+`vault-k8s-token` / `kubectl` uses `acb kube-token`; `vault-kv` / `git` uses
+`acb git-credential <id> get|store|erase`. These declarations run no child,
+need no discovery shim, and cannot declare `trusted_argv` or
+`unqualified_exec`; `acb exec` refuses them. The git declaration reuses the
+broker's `issuer.path`, explicit `issuer.fields` and `delivery.hosts` keys,
+requires one bare host and explicit `username_field` / `password_field`
+mappings, and defaults `delivery.protocol` to `https`. Doctor checks KV read
+permission without reading the value; static helper delivery remains `D0`
+and warns. See [protocol, declaration and plane selection](broker.md#standalone-git-credential-no-daemon).
+
 `doctor` and `inspect` classify each capability × harness into exactly one:
 
 | Status | Meaning |

@@ -545,8 +545,16 @@ def read_granted(
     whether the identity may ``update`` (or ``create`` / ``root``) on
     ``<mount>/creds/<role>``, asked the same way and with the same contract.
     """
-    helper = is_helper_issuer(cap)
+    helper = is_helper_issuer(cap) and cap.issuer_kind == "vault-k8s-token"
     path = cap.options.get("vault")
+    if is_helper_issuer(cap) and cap.delivery.get("tool") == "git":
+        from .git_credential import validate
+
+        try:
+            resolver_cap, _ = validate(cap)
+        except Exception:
+            return None
+        path = resolver_cap.options["vault"]
     creds_path = _creds_api_path(cap) if helper else None
     if helper:
         if creds_path is None:

@@ -30,7 +30,7 @@ from .protocol import ErrorCode
 PROG = "acb-git-credential"
 
 
-def parse_attributes(stream: IO[str]) -> dict[str, str]:
+def parse_attributes(stream: IO[str], *, strict: bool = False) -> dict[str, str]:
     """``key=value`` lines up to a blank line or EOF. Array keys (``k[]``) are ignored."""
     attrs: dict[str, str] = {}
     for line in stream:
@@ -38,15 +38,21 @@ def parse_attributes(stream: IO[str]) -> dict[str, str]:
         if not line:
             break
         key, sep, value = line.partition("=")
-        if not sep or key.endswith("[]"):
+        if key.endswith("[]"):
+            continue  # Git extensions (capability[] / wwwauth[]) are not scalar scope.
+        if not sep:
+            if strict:
+                raise ValueError("invalid credential attribute")
             continue
+        if strict and (key in attrs or "\0" in line or "\r" in line):
+            raise ValueError("ambiguous credential attribute")
         attrs[key] = value
     return attrs
 
 
 def _clean(value: object) -> str | None:
     # A newline or NUL would let a value inject extra attributes into git.
-    if not isinstance(value, str) or not value or "\n" in value or "\0" in value:
+    if not isinstance(value, str) or not value or any(c in value for c in "\r\n\0"):
         return None
     return value
 
@@ -109,6 +115,8 @@ def main(
             return 0
         return _err(stderr, f"checkout refused: {exc.code}: {exc.message}")
     value = result.get("value")
+    if result.get("protocol", "https") != (protocol or "https"):
+        return 0
     if not carries_secret or not isinstance(value, dict):
         return _err(stderr, "broker returned no credential")
     password = _clean(value.get("password")) or _clean(value.get("token"))

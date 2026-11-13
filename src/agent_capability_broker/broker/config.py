@@ -79,6 +79,9 @@ class DeliverySpec:
     tool: str | None = None
     hosts: tuple[str, ...] = ()
     username: str | None = None
+    username_field: str | None = None
+    password_field: str | None = None
+    protocol: str = "https"
 
 
 @dataclass(frozen=True)
@@ -197,11 +200,20 @@ def _parse_delivery(cap_id: str, raw: object) -> DeliverySpec:
         raise BrokerConfigError(f"{where}: 'username' must be a non-empty string")
     if rung == "helper" and tool is None:
         raise BrokerConfigError(f"{where}: rung 'helper' needs a 'tool'")
+    fields: dict[str, str | None] = {}
+    for key in ("username_field", "password_field"):
+        fields[key] = _req_str(raw, key, where=where) if key in raw else None
+    protocol = raw.get("protocol", "https")
+    if not isinstance(protocol, str) or not re.fullmatch(r"[a-z][a-z0-9+.-]*", protocol):
+        raise BrokerConfigError(f"{where}: 'protocol' must be a lowercase URL scheme")
     return DeliverySpec(
         rung=str(rung),
         tool=tool,
         hosts=tuple(h.lower() for h in hosts),
         username=username,
+        username_field=fields["username_field"],
+        password_field=fields["password_field"],
+        protocol=protocol,
     )
 
 

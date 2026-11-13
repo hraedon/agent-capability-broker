@@ -1429,6 +1429,12 @@ def _cmd_kube_token(args: argparse.Namespace) -> int:
     return kube_token.run(args.capability, args.manifest)
 
 
+def _cmd_git_credential(args: argparse.Namespace) -> int:
+    from . import git_credential
+
+    return git_credential.run(args.capability, args.operation, args.manifest)
+
+
 def _cmd_rotate_secret_id(args: argparse.Namespace) -> int:
     from . import rotate_secret_id
 
@@ -1492,6 +1498,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     kt.set_defaults(func=_cmd_kube_token)
+
+    gc = sub.add_parser(
+        "git-credential", help="standalone git credential helper (no daemon)",
+    )
+    from .git_credential import configure_parser
+
+    configure_parser(gc)
+    gc.set_defaults(func=_cmd_git_credential)
 
     rotation = sub.add_parser(
         "rotate-secret-id", help="rotate one AppRole's plane files (dry-run unless --apply)"
@@ -1601,6 +1615,10 @@ def build_parser() -> argparse.ArgumentParser:
 def _dispatch(raw: list[str], argv: list[str] | None) -> int:
     if raw and raw[0] == "exec":
         return _cmd_exec_raw(raw[1:])
+    if raw and raw[0] == "git-credential":
+        from . import git_credential
+
+        return git_credential.main(raw[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.version:

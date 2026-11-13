@@ -249,6 +249,97 @@ Not protected:
 - `vault-kv` values are standing secrets (`D0`). Revoking the checkout does not
   revoke the value.
 
+## Standalone git credential (no daemon)
+
+Since 0.7.0, `acb git-credential <capability-id> get|store|erase [-m MANIFEST]`
+serves git directly on Windows and Linux, without a daemon, socket or child
+command. The caller selects the capability; acb does not detect the harness.
+
+It reuses the daemon's `vault-kv` issuer (`path`, explicit `fields`) and helper
+delivery (`tool = "git"`, `hosts`). The standalone helper requires **exactly
+one** bare host in `delivery.hosts`, with no port, path, URL syntax, trailing
+dot or wildcard (ASCII DNS names / IPv4 only). This is the required host, using
+the existing plural key rather than introducing a competing `host` option.
+`delivery.protocol` defaults to `https`; it must match git's protocol exactly.
+`username_field` and `password_field` name the two distinct selected KV fields.
+Do not also declare the legacy top-level `vault` / `field` / `fields` keys.
+
+```toml
+[capability."cred:forge-bot"]
+provider = "cred"
+source = "vault"
+harnesses = ["codex"]               # advisory; caller selects the capability
+issuer = {kind = "vault-kv", path = "kv/example/forge/bot", fields = ["login", "token"]}
+delivery = {rung = "helper", tool = "git", hosts = ["forge.example"], username_field = "login", password_field = "token"}
+assurance = "D0"
+```
+
+The declaration also works through `acb-broker` / `acb-git-credential` (whose
+existing transport is HTTPS only); the shared delivery parser and daemon apply
+the same field mapping. Existing daemon declarations using canonical
+`username` / `password` fields or `delivery.username` keep working there.
+
+```sh
+git config credential.https://forge.example.helper '!acb git-credential cred:forge-bot'
+```
+
+Git appends `get`, `store` or `erase` and passes attributes on stdin. On a
+matching `get`, stdout contains only `username=...` and `password=...` lines.
+A different or missing host/protocol, or any `port`, `path` or `url` attribute,
+produces no output and exits 0, without accessing Vault. Hosts compare without
+case; ports (even `:443`) and paths are never stripped or normalized. With
+`credential.useHttpPath=true`, git sends a path and this host-only helper
+declines the request. Duplicate scalar attributes or malformed requests are
+errors. Values containing CR, LF or NUL, missing fields, and empty/non-string
+fields are refused before any answer is written. `store` and `erase` consume
+stdin and do nothing, even if the manifest is absent. The helper stores no
+credential and `erase` does not revoke the standing forge secret.
+
+Every failure emits no answer and one stderr line containing only its exception
+class: exit 2 for declaration errors, 1 for operational errors. The identity
+needs `read` on `kv/data/example/forge/bot`; `doctor` checks that grant through
+`sys/capabilities-self` without reading the value. KV resolution uses the same
+auth as `acb exec`, including fail-closed AppRole handling and 0.6.0's best-effort
+revocation of logins acb owns, on successful or failed reads. Explicit development
+`VAULT_TOKEN` values remain borrowed. The default policy normally supplies
+`auth/token/revoke-self`. A value-free provenance event records each attempted
+matching read; no request attributes, Vault path or field values are recorded.
+
+There is no child command: `acb exec` refuses this capability, neither
+`trusted_argv` nor `unqualified_exec` may be declared (even `false`), and no
+discovery shim is needed. This removes the "any command may receive this
+credential" exception. It does **not** authenticate the caller as git: any
+process with access to the same Vault plane can invoke the helper protocol.
+The secret is still static, available in VM memory and handed to git, so its
+assurance remains `D0`; `doctor` continues to warn about that static helper.
+
+### Per-harness wrapper and plane selection
+
+Provision a wrapper for each harness and select it in that harness's git
+configuration or launch environment. For example, `forge-codex-helper`:
+
+```sh
+#!/bin/sh
+export ACB_VAULT_ENV=/example/planes/codex-vault.env
+exec acb git-credential cred:forge-bot "$@"
+```
+
+On Windows a corresponding `C:/example/forge-codex-helper.cmd` can be:
+
+```bat
+@echo off
+set "ACB_VAULT_ENV=C:\example\planes\codex-vault.env"
+acb git-credential cred:forge-bot %*
+```
+
+Point git at the provisioned wrapper (for example
+`git -c credential.https://forge.example.helper='!/example/bin/forge-codex-helper' fetch`).
+An OpenCode wrapper selects its own capability ID and `ACB_VAULT_ENV` plane
+instead; declare that capability in the manifest as well. Keep selection in
+the caller's wrapper: no process-tree inference or optional harness detector
+is part of this verb. Separate capability/plane labels are advisory within
+one OS identity; Vault policy and VM boundaries determine actual access.
+
 ## Standalone kubectl credential (no daemon)
 
 `acb kube-token <capability-id> [-m MANIFEST]` is a cross-platform (Windows and

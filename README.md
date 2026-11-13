@@ -78,6 +78,10 @@ and reconciles reality to it.
   default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
   (bootstrap: provision one harness from the manifest + verify), `shims`
   (read-only shim parity report).
+- `kube-token <id>` and `git-credential <id> get|store|erase` are standalone
+  native credential helpers (cross-platform, no daemon). The git helper delivers
+  only the declared Vault KV username/password for one exact host and protocol;
+  it remains a static `D0` secret. See [helper setup](docs/broker.md#standalone-git-credential-no-daemon).
 - `rotate-secret-id --plane FILE [--plane FILE ...]` rotates a host's AppRole
   SecretID across its plane files (dry-run by default; `--apply` to act;
   `--min-age 7d` by default). See [rotation and recovery](docs/broker.md#approle-secretid-rotation).

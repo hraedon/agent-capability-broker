@@ -189,15 +189,17 @@ def unqualified_exec(cap: Capability) -> bool:
 
 
 def is_helper_issuer(cap: Capability) -> bool:
-    """A cred capability served by ``acb kube-token`` rather than ``acb exec``:
-    ``rung = "helper"`` with a ``vault-k8s-token`` issuer.
+    """A cred served by a standalone helper rather than ``acb exec``.
 
     It has no child command, so the exact-command rule does not apply to it (and
     ``acb exec`` refuses it outright). Pure; reads nothing."""
     return (
         cap.provider == "cred"
         and cap.rung == "helper"
-        and cap.issuer_kind == "vault-k8s-token"
+        and (
+            cap.issuer_kind == "vault-k8s-token"
+            or cap.delivery.get("tool") == "git"
+        )
     )
 
 
@@ -216,6 +218,10 @@ def validate_cred_trusted_argv(cap: Capability) -> tuple[str, ...]:
                 f"{cap.id}: a helper-rung issuer capability runs no child command; "
                 f"remove options.{' / options.'.join(declared)}"
             )
+        if cap.delivery.get("tool") == "git":
+            from .git_credential import validate
+
+            validate(cap)
         return ()
     if unqualified_exec(cap):
         return ()

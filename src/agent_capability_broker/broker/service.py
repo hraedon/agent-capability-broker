@@ -233,6 +233,22 @@ class Broker:
             return ok_response(result)
         # Rung 1 by design: the helper hands this value to git/kubectl.
         result["value"] = value
+        if front_end == "git":
+            # Preserve legacy canonical fields while allowing the same explicit
+            # field mapping as the standalone helper.
+            source_values = value
+            value = dict(value)
+            for key, source in (
+                ("username", cap.delivery.username_field),
+                ("password", cap.delivery.password_field),
+            ):
+                if source is not None:
+                    mapped = source_values.get(source)
+                    if not isinstance(mapped, str) or not mapped:
+                        raise IssuerError(ErrorCode.ISSUER_ERROR, "missing mapped git field")
+                    value[key] = mapped
+            result["value"] = value
+            result["protocol"] = cap.delivery.protocol
         if cap.delivery.username is not None:
             result["username"] = cap.delivery.username
         return ok_response(result, carries_secret=True)
