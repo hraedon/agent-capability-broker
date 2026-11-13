@@ -20,6 +20,7 @@ cred = [
 ]
 dev = [
     { name = "agent-suite-conformance" },
+    { name = "hvac" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pyyaml" },
@@ -36,6 +37,7 @@ suite-secrets = [
 requires-dist = [
     { name = "agent-suite-conformance", marker = "extra == 'dev'", specifier = "==1.1.0" },
     { name = "hvac", marker = "extra == 'cred'", specifier = ">=2.1,<3" },
+    { name = "hvac", marker = "extra == 'dev'", specifier = ">=2.1,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<9" },
