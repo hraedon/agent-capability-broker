@@ -138,7 +138,9 @@ def plane(tmp_path: Path, name: str = "one", *, file: bool = False,
 
 
 def call(paths: list[Path], *, apply: bool = False, age: str = "7d") -> int:
-    args = ["rotate-secret-id", "--min-age", age]
+    # One token: a value that starts with "-" (the "-1d" case) must reach the
+    # duration check, not be read by argparse as another option.
+    args = ["rotate-secret-id", f"--min-age={age}"]
     for path in paths:
         args.extend(["--plane", str(path)])
     return main(args + (["--apply"] if apply else []))
