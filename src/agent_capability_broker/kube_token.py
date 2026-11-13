@@ -122,7 +122,8 @@ def mint(
     if client is None:
         from . import cred_vault  # lazy: the [cred] extra stays optional
 
-        client = cred_vault.authenticated_client()
+        # AppRole or in-cluster identity only: an ambient VAULT_TOKEN is never used.
+        client = cred_vault.authenticated_client(allow_token=False)
     path = f"{params.get('mount', 'kubernetes')}/creds/{params['role']}"
     resp = client.write_data(path, data=request_body(params))
     data = resp.get("data") if isinstance(resp, dict) else None

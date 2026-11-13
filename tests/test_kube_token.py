@@ -314,7 +314,24 @@ def test_token_empty_invariant_without_vault_token(
     code = main(["kube-token", CAP_ID, "-m", _manifest(tmp_path)])
     out = capsys.readouterr()
     assert code == 1 and out.out == "" and "RuntimeError" in out.err
-    assert [c.token for c in _AuthClient.instances] == [""]
+    assert all(c.token == "" and not c.writes for c in _AuthClient.instances)
+
+
+def test_an_explicit_vault_token_is_refused(
+    tmp_path: Path, vault_env: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The helper runs on the harness's AppRole (or in-cluster) identity only: a
+    token in the plane file or the environment never mints a Kubernetes token."""
+    vault_env.write_text(
+        "VAULT_ADDR=https://vault.EXAMPLE.local\nVAULT_TOKEN=explicit\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ACB_VAULT_ENV", str(vault_env))
+    monkeypatch.setenv("VAULT_TOKEN", "ambient")
+    code = main(["kube-token", CAP_ID, "-m", _manifest(tmp_path)])
+    out = capsys.readouterr()
+    assert code == 1 and out.out == ""
+    assert all(not c.writes for c in _AuthClient.instances)
 
 
 def test_incomplete_approle_fails_closed(
