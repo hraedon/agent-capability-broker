@@ -1429,6 +1429,14 @@ def _cmd_kube_token(args: argparse.Namespace) -> int:
     return kube_token.run(args.capability, args.manifest)
 
 
+def _cmd_rotate_secret_id(args: argparse.Namespace) -> int:
+    from . import rotate_secret_id
+
+    return rotate_secret_id.run(
+        [Path(p) for p in args.plane], min_age=args.min_age, apply=args.apply
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acb", description=__doc__)
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -1484,6 +1492,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="manifest path (default: $ACB_MANIFEST, suite config, platform config dir, then ./)",
     )
     kt.set_defaults(func=_cmd_kube_token)
+
+    rotation = sub.add_parser(
+        "rotate-secret-id", help="rotate one AppRole's plane files (dry-run unless --apply)"
+    )
+    rotation.add_argument("--plane", action="append", required=True, help="plane dotenv file")
+    rotation.add_argument("--min-age", default="7d", help="minimum age (default: 7d; s/m/h/d)")
+    rotation.add_argument("--apply", action="store_true", help="rotate and update the files")
+    rotation.set_defaults(func=_cmd_rotate_secret_id)
 
     ih = sub.add_parser(
         "install-harness",

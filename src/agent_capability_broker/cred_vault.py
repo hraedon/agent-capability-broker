@@ -26,6 +26,8 @@ the model context (the caller injects into a child process).
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .model import Capability, _user_config_root, suite_config_dir
@@ -47,6 +49,10 @@ _APPROLE_VARS = (
 )
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+class AppRoleLoginRejected(RuntimeError):
+    """Vault definitively rejected login material, rather than being unreachable."""
 
 
 def _default_vault_env_paths() -> list[Path]:
@@ -294,7 +300,10 @@ def _approle_material(
     return role, secret, mount
 
 
-def _authenticate(client: object, env: dict[str, str], *, source: str | None = None) -> None:
+def _authenticate(
+    client: object, env: dict[str, str], *, source: str | None = None,
+    approle_only: bool = False,
+) -> bool:
     """Log `client` in by the first available method using the resolved `env`
     (passed in so the same access plane drives both addr lookup and auth). Raises
     if none work.
@@ -306,26 +315,32 @@ def _authenticate(client: object, env: dict[str, str], *, source: str | None = N
     #    before AppRole is even inspected, so a k8s-authenticated host — which
     #    has neither AppRole material nor a token — is untouched by the
     #    fail-closed rule below.
-    if _K8S_TOKEN.is_file():
+    if not approle_only and _K8S_TOKEN.is_file():
         role = env.get("VAULT_K8S_ROLE")
         if role:
             jwt = _K8S_TOKEN.read_text(encoding="utf-8").strip()
-            client.auth.kubernetes.login(role=role, jwt=jwt)  # type: ignore[attr-defined]
-            return
+            try:
+                client.auth.kubernetes.login(role=role, jwt=jwt)  # type: ignore[attr-defined]
+            except Exception as exc:
+                raise RuntimeError(f"Vault login failed ({type(exc).__name__})") from exc
+            return True
     # 2. AppRole (role_id + secret_id from env / the .env file / the *_FILE
     #    paths). Declared-but-incomplete material raises out of here.
     material = _approle_material(env, source=source)
     if material is not None:
         role_id, secret_id, mount = material
-        client.auth.approle.login(  # type: ignore[attr-defined]
-            role_id=role_id, secret_id=secret_id, mount_point=mount
-        )
-        return
+        try:
+            client.auth.approle.login(  # type: ignore[attr-defined]
+                role_id=role_id, secret_id=secret_id, mount_point=mount
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Vault login failed ({type(exc).__name__})") from exc
+        return True
     # 3. A pre-existing token. Only an *explicit* VAULT_TOKEN reaches this: the
     #    client is constructed with `token=""`, so `client.token` is falsy unless
     #    a token was declared (never from `~/.vault-token`).
-    if getattr(client, "token", None):
-        return
+    if not approle_only and getattr(client, "token", None):
+        return False
     raise RuntimeError(
         "no Vault auth available (tried k8s service-account, AppRole, VAULT_TOKEN)"
     )
@@ -387,8 +402,57 @@ def authenticated_client(
     # AppRole-only -- the runtime half of the trap WI-015 closed in `onboard`.
     token = (env.get("VAULT_TOKEN") or "") if allow_token else ""
     client = hvac.Client(url=addr, token=token)
-    _authenticate(client, env, source=_auth_source(env, env_path))
+    client._acb_login_owned = _authenticate(client, env, source=_auth_source(env, env_path))
     return client
+
+
+def approle_client(env: dict[str, str]) -> object:
+    """Authenticate only the supplied AppRole; never consult ambient auth files.
+
+    Rotation uses this for both the current and replacement SecretID. The
+    caller owns the returned login token and must revoke it in a finally.
+    """
+    import hvac
+
+    if not env.get("VAULT_ADDR"):
+        raise RuntimeError("VAULT_ADDR is not set")
+    client = hvac.Client(url=env["VAULT_ADDR"], token="")
+    try:
+        client._acb_login_owned = _authenticate(client, env, approle_only=True)
+    except RuntimeError as exc:
+        exceptions = getattr(hvac, "exceptions", None)
+        if exceptions is not None and isinstance(
+            exc.__cause__, (exceptions.InvalidRequest, exceptions.Forbidden)
+        ):
+            raise AppRoleLoginRejected("AppRole login rejected") from exc
+        raise
+    return client
+
+
+def revoke_self(client: object) -> None:
+    """Best-effort cleanup of an owned login. Never expose upstream errors."""
+    try:
+        client.auth.token.revoke_self()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+@contextmanager
+def client_session(
+    client: object | None = None, *, vault_env: str | os.PathLike[str] | None = None,
+    allow_token: bool = True, revoke: bool = False,
+) -> Iterator[object]:
+    """Bound a single use; injected clients are borrowed unless revoke=True."""
+    owned = client is None
+    if client is None:
+        client = authenticated_client(vault_env, allow_token=allow_token)
+    try:
+        yield client
+    finally:
+        if (not owned and revoke) or (
+            owned and getattr(client, "_acb_login_owned", False) is True
+        ):
+            revoke_self(client)
 
 
 def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = None) -> bool:
@@ -405,8 +469,8 @@ def reachable(cap: Capability, *, vault_env: str | os.PathLike[str] | None = Non
     extra, no `VAULT_ADDR`, or auth fails) so the caller maps it to `UNKNOWN`
     rather than over-claiming a verdict.
     """
-    client = authenticated_client(vault_env)
-    return bool(client.is_authenticated())  # type: ignore[attr-defined]  # token self-lookup
+    with client_session(vault_env=vault_env) as client:
+        return bool(client.is_authenticated())  # type: ignore[attr-defined]
 
 
 def capabilities_self(
@@ -428,14 +492,13 @@ def capabilities_self(
     "unknown" rather than over-claiming a clean result. Exception text from the
     transport is reduced to its type name (it can embed addresses).
     """
-    if client is None:
-        client = authenticated_client(vault_env)
-    try:
-        reply = client.sys.get_capabilities(paths)  # type: ignore[attr-defined]
-    except Exception as exc:
-        raise RuntimeError(
-            f"sys/capabilities-self failed ({type(exc).__name__})"
-        ) from exc
+    with client_session(client, vault_env=vault_env) as active:
+        try:
+            reply = active.sys.get_capabilities(paths)  # type: ignore[attr-defined]
+        except Exception as exc:
+            raise RuntimeError(
+                f"sys/capabilities-self failed ({type(exc).__name__})"
+            ) from exc
     # Vault returns the per-path map at the top level and again under "data";
     # older single-path replies use a bare "capabilities" list.
     scopes: list[dict[str, object]] = []
@@ -490,6 +553,8 @@ def read_granted(
             return None
     elif not isinstance(path, str) or not path:
         return None
+    owned = False
+    client = None
     try:
         import hvac
 
@@ -499,7 +564,7 @@ def read_granted(
             return None
         # `token=""`, never `None` (see `reachable`).
         client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN") or "")
-        _authenticate(client, env, source=_auth_source(env, vault_env))
+        owned = _authenticate(client, env, source=_auth_source(env, vault_env))
         if creds_path is not None:
             api_path = creds_path
         else:
@@ -508,6 +573,9 @@ def read_granted(
         resp = client.adapter.post("/v1/sys/capabilities-self", json={"paths": [api_path]})
     except Exception:
         return None
+    finally:
+        if owned and client is not None:
+            revoke_self(client)
     caps = _capabilities_in(resp, api_path)
     if caps is None:
         return None
@@ -601,20 +669,30 @@ def resolve(cap: Capability) -> dict[str, str]:
             "pip install 'agent-capability-broker[cred]'"
         ) from exc
 
+    owned = False
+    client = None
     try:
         # `token=""`, never `None` — see the note in `reachable`.
         client = hvac.Client(url=addr, token=env.get("VAULT_TOKEN") or "")
-        _authenticate(client, env, source=_auth_source(env))
+        owned = _authenticate(client, env, source=_auth_source(env))
         mount, secret_path = _split_mount(path)
-        resp = client.secrets.kv.v2.read_secret_version(
-            mount_point=mount, path=secret_path, raise_on_deleted_version=True
-        )
+        try:
+            resp = client.secrets.kv.v2.read_secret_version(
+                mount_point=mount, path=secret_path, raise_on_deleted_version=True
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"vault read failed for {cap.id} ({type(exc).__name__})"
+            ) from exc
     except RuntimeError:
         raise
     except Exception as exc:
         raise RuntimeError(
             f"vault read failed for {cap.id} ({type(exc).__name__})"
         ) from exc
+    finally:
+        if owned and client is not None:
+            revoke_self(client)
     data = resp["data"]["data"]
 
     out: dict[str, str] = {}

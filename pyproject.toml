@@ -1,6 +1,6 @@
 [project]
 name = "agent-capability-broker-hraedon"
-version = "0.5.0"
+version = "0.6.0"
 description = "Keep agents at capability parity across harnesses (creds, E2E tooling) from one manifest"
 readme = "README.md"
 requires-python = ">=3.12"

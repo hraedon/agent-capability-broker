@@ -7,8 +7,10 @@ checkout registry), this authenticates to Vault exactly the way ``acb exec``
 does for a vault-sourced credential (``cred_vault.authenticated_client``: the
 WI-016 ``token=""`` and fail-closed AppRole invariants), makes **one** write to
 ``<mount>/creds/<role>`` with that login token, and prints the result. It does
-not create a child token and does not revoke anything: the lease simply
-expires, and the Vault policy needs only ``update`` on the creds path.
+not create a child token. The owned Vault login is revoked after the request
+(best effort); the issued Kubernetes token for a pre-existing ServiceAccount
+remains valid until its own expiry. The policy also needs ``revoke-self``
+(normally supplied by Vault's default policy).
 
 The issuer/delivery declaration is validated by the broker's own parser
 (``broker.config``, stdlib-only, importable on Windows) so there is one parser,
@@ -113,19 +115,19 @@ def mint(
     *,
     client: Any = None,
     clock: Callable[[], float] = time.time,
+    revoke: bool = False,
 ) -> dict[str, Any]:
     """One Vault write with the login token; returns the ExecCredential document.
 
     ``client`` is an authenticated hvac client (tests inject a fake); production
     builds one through ``cred_vault.authenticated_client``.
     """
-    if client is None:
-        from . import cred_vault  # lazy: the [cred] extra stays optional
+    from . import cred_vault  # lazy: the [cred] extra stays optional
 
-        # AppRole or in-cluster identity only: an ambient VAULT_TOKEN is never used.
-        client = cred_vault.authenticated_client(allow_token=False)
     path = f"{params.get('mount', 'kubernetes')}/creds/{params['role']}"
-    resp = client.write_data(path, data=request_body(params))
+    # Injected clients are borrowed by default; callers can opt into cleanup.
+    with cred_vault.client_session(client, allow_token=False, revoke=revoke) as active:
+        resp = active.write_data(path, data=request_body(params))  # type: ignore[attr-defined]
     data = resp.get("data") if isinstance(resp, dict) else None
     token = data.get("service_account_token") if isinstance(data, dict) else None
     if not isinstance(token, str) or not token:

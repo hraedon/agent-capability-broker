@@ -286,11 +286,83 @@ users:
 The identity needs only `update` on `kubernetes/creds/example-role`;
 `acb doctor` checks that grant through `sys/capabilities-self`. Unlike the
 daemon path, there is no per-checkout child token and no checkout registry:
-nothing is revoked afterwards, the lease expires on its own, and the
+the owned Vault login token is revoked afterwards (best effort), and the
 expiry reported to kubectl is the lease minus 30 seconds. On failure nothing is
 printed to stdout, stderr carries only the exception class name, and the exit
 code is 1 (2 for a manifest or usage problem). `acb exec` refuses a helper-rung
 capability and points here.
+
+## AppRole SecretID rotation
+
+`acb rotate-secret-id --plane /path/to/one.env --plane /path/to/two.env`
+checks one identity's explicitly listed planes; add `--apply` to rotate. The
+default is a dry run: it logs in, reports the role, paths, whether rotation is
+due, and the `update` grants on the mint/destroy paths, then revokes its login.
+It never uses ambient Vault variables, Kubernetes auth or a developer token.
+All planes must have the same address, RoleID and AppRole mount (default
+`approle`). Inline and `*_FILE` deliveries follow `cred_vault`'s precedence;
+relative credential-file paths resolve against the working directory.
+
+The role's policy needs `update` on both
+`auth/approle/role/example-agent/secret-id` and
+`auth/approle/role/example-agent/secret-id/destroy` (substitute the mount and
+role), plus lookup-self, capabilities-self and revoke-self, normally supplied
+by Vault's default policy. SecretID lookup is neither needed nor attempted.
+Set a finite `secret_id_ttl` and **`secret_id_num_uses=0`** (unlimited logins)
+in Vault separately, then schedule this command
+more frequently than that TTL. `--min-age` accepts an integer with `s`, `m`,
+`h` or `d`; the default is `7d`. A missing/invalid rotation timestamp means due.
+
+Apply mints with `rotated_by=acb` and the hostname as metadata, verifies a fresh
+AppRole login, atomically replaces every delivery, destroys the old SecretID
+using the new login, then revokes both login tokens in `finally` (best effort).
+Other plane lines, quotes, inline comments, BOMs, line endings and file modes
+are preserved, including Windows owner/group/DACLs and Linux ownership/access ACLs. A
+failure to copy permissions stops the replacement before writing secret bytes.
+Linux replacement directories are fsynced before destruction. No credential
+backups or recovery secrets are kept: the old
+SecretID remains valid until all deliveries have been replaced. Plane files
+are intentionally updated only by this explicit rotation verb.
+
+Inline deliveries get a `# acb: secret-id rotated <UTC timestamp>` comment
+immediately before the secret. A `VAULT_SECRET_ID_FILE` delivery leaves its
+plane unchanged and writes a sibling `<secret-file>.rotated` timestamp plus
+SHA-256 digest. Metadata is replaced before the secret; it counts only when
+the digest matches the current value, so a failed replacement cannot make an
+old SecretID appear fresh. The SecretID file still contains only its value
+and original surrounding whitespace. Shared delivery files are written once.
+
+If a write fails, the old SecretID is kept and the single error line lists
+which planes hold the new value, the old value, or could not be read. Re-run
+with the **same complete plane list** and `--apply`: mixed values are accepted
+only if one working login is uniquely newer by rotation timestamp, or only
+one can log in and Vault definitively rejects the other (400/403; transport
+errors fail closed). Recovery synchronizes to that verified value without minting
+again when it has a rotation timestamp, even if `--min-age` has not elapsed,
+then destroys the other value. If the sole working value has no timestamp,
+it mints and verifies a fresh replacement instead of claiming the old one is new.
+Working values tied for newest age are refused. Repeated interrupted recovery
+can leave more than two values; the same unique-newest/sole-working rule applies.
+No SecretID or token
+appears in output or provenance. Exit codes: 0 success/not due, 1 operational
+failure, 2 invalid or ambiguous planes. Every apply attempt emits provenance;
+sink failure is reported without changing the rotation result.
+
+Overlapping rotations lock the supplied planes and delivery paths with sibling
+`.acb-rotation.lock` files. After a process crash, verify no rotation is running
+before removing stale locks and retrying. Avoid concurrent manual edits. If
+destroy fails after all writes, the new files stay usable and exit is 1; the
+old SecretID then remains until its Vault TTL or operator cleanup (its value
+is deliberately not retained for a later retry). A mint or verification failure
+leaves deliveries unchanged; any unused minted SecretID likewise expires at
+its configured TTL.
+
+KV resolution and read probes (`reachable`, `capabilities_self`, `read_granted`,
+including doctor) also revoke logins acb obtained by AppRole or Kubernetes auth.
+Explicit `VAULT_TOKEN` values and caller-injected clients are borrowed and are
+never revoked automatically. Standalone kube-token cleanup does not invalidate
+the issued Kubernetes token for a pre-existing ServiceAccount. The in-VM broker
+daemon's token lifetime is unchanged.
 
 ## Running it (manual, for now)
 

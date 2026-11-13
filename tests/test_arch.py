@@ -20,11 +20,13 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "agent_capability_broker"
 CORE_MODULES = [
     "model.py", "cli.py", "adapters.py", "providers.py", "provenance.py",
     "secret_sources.py", "surface.py", "onboard.py", "boundary.py", "launchers.py",
+    "rotate_secret_id.py",
 ]
 STDLIB_OK = {
     "__future__", "argparse", "ast", "collections", "dataclasses", "enum", "functools",
     "importlib", "json", "pathlib", "sys", "tomllib", "io", "contextlib", "os", "typing",
     "datetime", "subprocess", "re", "shutil", "signal", "stat", "time", "uuid",
+    "hashlib", "socket", "tempfile",
     # platformdirs: config-dir portability (not the truth/verdict path) — sole permitted runtime dep
     "platformdirs",
 }

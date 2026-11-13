@@ -78,6 +78,9 @@ and reconciles reality to it.
   default), `exec` (inject-and-run, never surfacing the secret), `install-harness`
   (bootstrap: provision one harness from the manifest + verify), `shims`
   (read-only shim parity report).
+- `rotate-secret-id --plane FILE [--plane FILE ...]` rotates a host's AppRole
+  SecretID across its plane files (dry-run by default; `--apply` to act;
+  `--min-age 7d` by default). See [rotation and recovery](docs/broker.md#approle-secretid-rotation).
 - **Provenance emission** of every acting verb to regista / agent-provenance.
 
 **Out / non-goals:**
